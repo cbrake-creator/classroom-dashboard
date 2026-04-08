@@ -1,0 +1,1512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Classroom Technology Health Dashboard</title>
+<style>
+  :root {
+    --bg-primary: #0f1117;
+    --bg-secondary: #1a1d27;
+    --bg-card: #222632;
+    --bg-card-hover: #2a2f3d;
+    --bg-sidebar: #161922;
+    --text-primary: #e8eaf0;
+    --text-secondary: #9ca3b4;
+    --text-muted: #6b7280;
+    --green: #22c55e;
+    --green-bg: rgba(34,197,94,0.12);
+    --green-border: rgba(34,197,94,0.3);
+    --red: #ef4444;
+    --red-bg: rgba(239,68,68,0.12);
+    --red-border: rgba(239,68,68,0.3);
+    --yellow: #eab308;
+    --yellow-bg: rgba(234,179,8,0.12);
+    --yellow-border: rgba(234,179,8,0.3);
+    --gray: #6b7280;
+    --gray-bg: rgba(107,114,128,0.12);
+    --gray-border: rgba(107,114,128,0.3);
+    --blue: #3b82f6;
+    --blue-bg: rgba(59,130,246,0.12);
+    --border: #2d3344;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Top Bar ── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .topbar-logo {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    color: var(--text-primary);
+  }
+  .topbar-logo span { color: var(--blue); }
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .refresh-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .refresh-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Layout ── */
+  .layout {
+    display: flex;
+    min-height: calc(100vh - 49px);
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 220px;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 16px 0;
+    flex-shrink: 0;
+  }
+  .sidebar-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    padding: 0 16px;
+    margin-bottom: 8px;
+  }
+  .campus-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-left: 3px solid transparent;
+  }
+  .campus-item:hover { background: var(--bg-card); }
+  .campus-item.active {
+    background: var(--bg-card);
+    border-left-color: var(--blue);
+  }
+  .campus-item-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .campus-name {
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .campus-home-badge {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-primary);
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+  .campus-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+  .badge-green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .badge-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+  .badge-yellow { background: var(--yellow-bg); color: var(--yellow); border: 1px solid var(--yellow-border); }
+  .badge-gray { background: var(--gray-bg); color: var(--gray); border: 1px solid var(--gray-border); }
+
+  /* ── Alert Banner ── */
+  .alert-banner {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 24px;
+    background: var(--yellow-bg);
+    border-bottom: 1px solid var(--yellow-border);
+    font-size: 13px;
+    color: var(--yellow);
+  }
+  .alert-banner.visible { display: flex; }
+  .alert-banner-dismiss {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--yellow);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 4px;
+  }
+
+  /* ── Main Content ── */
+  .main {
+    flex: 1;
+    padding: 24px;
+    overflow-y: auto;
+  }
+
+  /* ── Page Header ── */
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  .page-header h1 {
+    font-size: 24px;
+    font-weight: 700;
+  }
+  .page-header-stats {
+    display: flex;
+    gap: 16px;
+  }
+  .stat-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+  }
+  .stat-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+  }
+
+  /* ── Section Headers ── */
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    margin-top: 8px;
+  }
+  .section-header h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .section-count {
+    font-size: 12px;
+    color: var(--text-muted);
+    background: var(--bg-card);
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+  .section-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 28px 0 20px;
+  }
+
+  /* ── Room Cards Grid ── */
+  .room-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .room-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+    overflow: hidden;
+  }
+  .room-card:hover {
+    background: var(--bg-card-hover);
+    border-color: #3d4355;
+    transform: translateY(-1px);
+    box-shadow: var(--shadow);
+  }
+  .room-card-status-bar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+  }
+  .room-card-status-bar.green { background: var(--green); }
+  .room-card-status-bar.red { background: var(--red); }
+  .room-card-status-bar.yellow { background: var(--yellow); }
+  .room-card-status-bar.gray { background: var(--gray); }
+
+  .room-card-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 12px;
+  }
+  .room-card-name {
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .room-card-status-icon {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .status-icon-green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .status-icon-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+  .status-icon-yellow { background: var(--yellow-bg); color: var(--yellow); border: 1px solid var(--yellow-border); }
+  .status-icon-gray { background: var(--gray-bg); color: var(--gray); border: 1px solid var(--gray-border); }
+
+  .room-card-devices {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .room-device-pip {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+  }
+  .room-card-issues {
+    margin-top: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--red);
+  }
+
+  /* ── Back Button ── */
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-bottom: 16px;
+  }
+  .back-btn:hover { background: var(--bg-card); color: var(--text-primary); }
+
+  /* ── Room Detail Header ── */
+  .room-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .room-detail-header h1 { font-size: 24px; font-weight: 700; }
+  .room-detail-campus {
+    font-size: 13px;
+    color: var(--text-muted);
+    background: var(--bg-card);
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+  }
+
+  /* ── Device Cards Grid ── */
+  .device-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+  .device-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .device-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .device-card-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .device-icon {
+    width: 36px; height: 36px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    background: var(--blue-bg);
+    color: var(--blue);
+  }
+  .device-name {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .device-model {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .device-status-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 10px;
+  }
+  .device-card-body { padding: 16px; }
+
+  /* ── Camera Card ── */
+  .camera-feed {
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: #000;
+    border-radius: var(--radius-sm);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    position: relative;
+    overflow: hidden;
+  }
+  .camera-feed-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  .camera-feed-placeholder svg { opacity: 0.4; }
+  .ptz-controls {
+    display: grid;
+    grid-template-columns: repeat(3, 40px);
+    grid-template-rows: repeat(3, 40px);
+    gap: 4px;
+    justify-content: center;
+    margin-bottom: 14px;
+  }
+  .ptz-btn {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    transition: all 0.15s;
+  }
+  .ptz-btn:hover { background: var(--bg-card-hover); border-color: var(--blue); }
+  .ptz-center { grid-column: 2; grid-row: 2; }
+  .zoom-controls {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 14px;
+  }
+  .zoom-btn {
+    width: 44px; height: 36px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 18px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+  .zoom-btn:hover { background: var(--bg-card-hover); border-color: var(--blue); }
+
+  /* ── Camera Session / API Bar ── */
+  .cam-session-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    margin-bottom: 14px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .cam-session-bar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+  }
+  .cam-session-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+  }
+  .cam-api-info {
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--bg-primary);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    margin-bottom: 14px;
+    border: 1px dashed var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .cam-api-info code {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 10px;
+    color: var(--blue);
+  }
+  .cam-pos-bar {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 14px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .cam-pos-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .cam-pos-value {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .cam-livescope-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    margin-bottom: 10px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .cam-livescope-ok { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .cam-livescope-warn { background: var(--yellow-bg); color: var(--yellow); border: 1px solid var(--yellow-border); }
+  .cam-livescope-err { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+  .cam-transition-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+    color: var(--yellow);
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .cam-transition-spinner {
+    width: 24px; height: 24px;
+    border: 3px solid var(--border);
+    border-top-color: var(--yellow);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .cam-snapshot-btn {
+    position: absolute;
+    top: 8px; right: 8px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #fff;
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s;
+    z-index: 2;
+  }
+  .cam-snapshot-btn:hover { background: rgba(0,0,0,0.8); border-color: var(--blue); }
+
+  /* ── Control Buttons ── */
+  .control-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ctrl-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .ctrl-btn-green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+  .ctrl-btn-green:hover { background: rgba(34,197,94,0.2); }
+  .ctrl-btn-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+  .ctrl-btn-red:hover { background: rgba(239,68,68,0.2); }
+  .ctrl-btn-blue { background: var(--blue-bg); color: var(--blue); border: 1px solid rgba(59,130,246,0.3); }
+  .ctrl-btn-blue:hover { background: rgba(59,130,246,0.2); }
+  .ctrl-btn-neutral { background: var(--bg-primary); color: var(--text-secondary); border: 1px solid var(--border); }
+  .ctrl-btn-neutral:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+  .ctrl-btn-active { background: var(--green); color: #000; border-color: var(--green); }
+
+  /* ── Metrics ── */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .metric-item {
+    background: var(--bg-primary);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+  }
+  .metric-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .metric-value {
+    font-size: 18px;
+    font-weight: 700;
+  }
+  .metric-value.ok { color: var(--green); }
+  .metric-value.warn { color: var(--yellow); }
+  .metric-value.error { color: var(--red); }
+
+  /* ── TV Input Selector ── */
+  .input-display {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+  }
+  .input-display.correct { background: var(--green-bg); border: 1px solid var(--green-border); }
+  .input-display.incorrect { background: var(--red-bg); border: 1px solid var(--red-border); }
+  .input-label { font-size: 12px; color: var(--text-muted); }
+  .input-value { font-size: 15px; font-weight: 600; }
+  .input-value.correct { color: var(--green); }
+  .input-value.incorrect { color: var(--red); }
+  .input-expected { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .input-buttons {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .input-btn {
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .input-btn:hover { border-color: var(--blue); color: var(--text-primary); }
+  .input-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+  /* ── Switch Port Grid ── */
+  .port-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(50px, 1fr));
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+  .port-item {
+    text-align: center;
+    padding: 8px 4px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .port-item .port-num { color: var(--text-muted); font-size: 10px; margin-bottom: 2px; }
+
+  /* ── SVG Icons ── */
+  .icon { display: inline-block; vertical-align: middle; }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .sidebar { width: 60px; }
+    .campus-name, .campus-home-badge, .sidebar-title { display: none; }
+    .campus-item { justify-content: center; padding: 10px 8px; }
+    .campus-item-left { gap: 0; }
+    .main { padding: 16px; }
+    .room-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+    .device-grid { grid-template-columns: 1fr; }
+    .page-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Top Bar ── -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo"><span>&#9671;</span> AV Health Dashboard</div>
+  </div>
+  <div class="topbar-right">
+    <div class="refresh-indicator">
+      <div class="refresh-dot"></div>
+      <span id="lastRefresh">Updated just now</span>
+    </div>
+    <span>Polling: 30s</span>
+  </div>
+</div>
+
+<!-- ── Alert Banner ── -->
+<div class="alert-banner" id="alertBanner">
+  <span>&#9888;</span>
+  <span id="alertBannerText"></span>
+  <button class="alert-banner-dismiss" onclick="dismissBanner()">&times;</button>
+</div>
+
+<!-- ── Layout ── -->
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-title">Campuses</div>
+    <div id="campusList"></div>
+  </aside>
+
+  <!-- Main Content -->
+  <div class="main" id="mainContent"></div>
+
+</div>
+
+<script>
+// ══════════════════════════════════════════════
+//  MOCK DATA
+// ══════════════════════════════════════════════
+
+// Helper to generate standard classroom devices
+function makeClassroom(id, name, subnet, tvCount, overrides) {
+  const base = `10.1.${subnet}`;
+  const devices = [
+    { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: `${base}.100`,
+      apiBase: `http://${base}.100/-wvhttp-01-`,
+      auth: { enabled: true, username: "admin", password: "env:CAM_PASS" },
+      status: "online", autoTrack: true, power: true,
+      panPos: 0, tiltPos: 0, zoomPos: 50,
+      sessionActive: false, controlClaimed: false,
+      livescopeStatus: 0, livescopeMsg: "OK",
+      powerTransition: null  // null | "standby-pending" | "waking"
+    },
+    { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: `${base}.101`, status: "online", power: true, cpu: Math.floor(Math.random()*30)+5, mem: Math.floor(Math.random()*30)+25 },
+    { id: "sw-1", type: "network-switch", brand: "Netgear", model: "M4250", ip: `${base}.102`, status: "online", ports: [
+      { num: 1, up: true }, { num: 2, up: true }, { num: 3, up: true }, { num: 4, up: true }, { num: 5, up: true }, { num: 6, up: true }
+    ]}
+  ];
+  const brands = ["Samsung", "LG", "Samsung", "Sony", "LG", "Samsung", "Sony"];
+  const models = ['QBR 65"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"'];
+  for (let i = 0; i < tvCount; i++) {
+    devices.push({ id: `tv-${i+1}`, type: "display", brand: brands[i % brands.length], model: models[i % models.length], ip: `${base}.${110+i}`, status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" });
+  }
+  const room = { id, name, type: "classroom", devices };
+  if (overrides) overrides(room);
+  return room;
+}
+
+function makeConference(id, name, subnet, overrides) {
+  const base = `10.1.${subnet}`;
+  // Standard conference room: Rally Bar + Tap + Sight Triple
+  const devices = [
+    { id: "rally-bar-1", type: "rally-bar", brand: "Logitech", model: "Rally Bar", ip: `${base}.100`, status: "online", power: true, inCall: false, firmware: "1.12.150" },
+    { id: "tap-1", type: "tap", brand: "Logitech", model: "Tap", ip: `${base}.101`, status: "online", power: true },
+    { id: "sight-1", type: "sight", brand: "Logitech", model: "Sight Triple", ip: `${base}.102`, status: "online", power: true }
+  ];
+  const room = { id, name, type: "conference", devices };
+  if (overrides) overrides(room);
+  return room;
+}
+
+// Hybrid classroom: Rally Bar + Tap + Sight Triple + NUC + Switch + Displays (no Canon camera)
+function makeHybridClassroom(id, name, subnet, tvCount, overrides) {
+  const base = `10.1.${subnet}`;
+  const devices = [
+    { id: "rally-bar-1", type: "rally-bar", brand: "Logitech", model: "Rally Bar", ip: `${base}.100`, status: "online", power: true, inCall: false, firmware: "1.12.150" },
+    { id: "tap-1", type: "tap", brand: "Logitech", model: "Tap", ip: `${base}.101`, status: "online", power: true },
+    { id: "sight-1", type: "sight", brand: "Logitech", model: "Sight Triple", ip: `${base}.102`, status: "online", power: true },
+    { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: `${base}.103`, status: "online", power: true, cpu: Math.floor(Math.random()*30)+5, mem: Math.floor(Math.random()*30)+25 },
+    { id: "sw-1", type: "network-switch", brand: "Netgear", model: "M4250", ip: `${base}.104`, status: "online", ports: [
+      { num: 1, up: true }, { num: 2, up: true }, { num: 3, up: true }, { num: 4, up: true }, { num: 5, up: true }, { num: 6, up: true }
+    ]}
+  ];
+  const brands = ["Samsung", "LG", "Samsung", "Sony", "LG", "Samsung", "Sony"];
+  const models = ['QBR 65"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"'];
+  for (let i = 0; i < tvCount; i++) {
+    devices.push({ id: `tv-${i+1}`, type: "display", brand: brands[i % brands.length], model: models[i % models.length], ip: `${base}.${110+i}`, status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" });
+  }
+  const room = { id, name, type: "classroom", devices };
+  if (overrides) overrides(room);
+  return room;
+}
+
+const CONFIG = {
+  campuses: [
+    {
+      id: "dallas", name: "Dallas", isHome: true,
+      rooms: [
+        // ── Classrooms (21) ──
+        // Hybrid classrooms (Rally Bar + Tap + Sight + NUC + Switch + Displays, no Canon camera)
+        makeHybridClassroom("cac-201", "CAC 201", 33, 4),
+        makeHybridClassroom("cac-202", "CAC 202", 34, 4),
+        makeClassroom("cac-203", "CAC 203", 1, 7),
+        makeClassroom("cac-204", "CAC 204", 2, 4),
+        makeClassroom("cac-205", "CAC 205", 3, 4),
+        makeClassroom("cac-206", "CAC 206", 4, 4),
+        makeClassroom("cac-207", "CAC 207", 5, 4),
+        makeClassroom("cac-208", "CAC 208", 6, 4, r => {
+          // Demo issue: NUC offline
+          r.devices[1].status = "offline"; r.devices[1].power = false; r.devices[1].cpu = 0; r.devices[1].mem = 0;
+        }),
+        makeClassroom("cac-211", "CAC 211", 7, 4),
+        makeClassroom("todd-114", "Todd 114", 8, 4),
+        makeClassroom("todd-115", "Todd 115", 9, 4),
+        makeClassroom("todd-215", "Todd 215", 10, 4),
+        makeHybridClassroom("todd-216", "Todd 216", 35, 4),
+        makeClassroom("todd-217", "Todd 217", 11, 4, r => {
+          // Demo issue: switch port down, TV offline
+          r.devices[2].ports[3].up = false;
+          r.devices[4].status = "offline"; r.devices[4].power = false;
+        }),
+        makeClassroom("todd-218", "Todd 218", 12, 4),
+        makeClassroom("todd-313", "Todd 313", 13, 4),
+        makeClassroom("todd-315", "Todd 315", 14, 4),
+        makeClassroom("todd-317", "Todd 317", 15, 4),
+        makeClassroom("todd-320", "Todd 320", 16, 4),
+        makeHybridClassroom("wsc-333", "WSC 333", 36, 4),
+        makeHybridClassroom("wsc-334", "WSC 334", 37, 4),
+        // ── Conference Rooms (12) — Rally Bar + Tap + Sight Triple ──
+        makeConference("mosher-109", "Mosher 109", 20),
+        makeConference("mosher-110", "Mosher 110", 21),
+        makeConference("mosher-204", "Mosher 204", 22),
+        makeConference("mosher-205", "Mosher 205", 23, r => {
+          // Demo issue: Sight offline
+          r.devices[2].status = "offline"; r.devices[2].power = false;
+        }),
+        makeConference("stearns-208", "Stearns 208", 24),
+        makeConference("stearns-003", "Stearns 003", 25),
+        makeConference("wsc-108h", "WSC 108h", 26),
+        makeConference("wsc-206", "WSC 206", 27),
+        makeConference("horner-204", "Horner 204", 28),
+        makeConference("horner-304", "Horner 304", 29, r => {
+          // Horner 304 also has a NUC + Yamaha audio
+          r.devices.push(
+            { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.1.29.103", status: "online", power: true, cpu: Math.floor(Math.random()*20)+5, mem: Math.floor(Math.random()*20)+25 },
+            { id: "yamaha-1", type: "audio", brand: "Yamaha", model: "Audio System", ip: "10.1.29.104", status: "online", power: true }
+          );
+        }),
+        makeConference("mitchell-109e", "Mitchell 109E", 30),
+        makeConference("hendricks-207", "Hendricks 207 (Seay Library)", 31)
+      ]
+    },
+    {
+      id: "houston", name: "Houston", isHome: false,
+      rooms: [
+        { id: "h-c101", name: "Classroom 101", type: "classroom", devices: [
+          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.2.1.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
+          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.2.1.101", status: "online", power: true, cpu: 15, mem: 45 },
+          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.2.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" },
+          { id: "tv-2", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.2.1.111", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]},
+        { id: "h-c102", name: "Classroom 102", type: "classroom", devices: [
+          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.2.2.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
+          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.2.2.101", status: "online", power: true, cpu: 9, mem: 38 },
+          { id: "tv-1", type: "display", brand: "LG", model: "UL3J 55\"", ip: "10.2.2.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" },
+          { id: "tv-2", type: "display", brand: "LG", model: "UL3J 55\"", ip: "10.2.2.111", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]},
+        { id: "h-conf-1", name: "Conference 1", type: "conference", devices: [
+          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 75\"", ip: "10.2.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" },
+          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.2.10.101", status: "online", power: true, cpu: 4, mem: 20 }
+        ]}
+      ]
+    },
+    {
+      id: "fortworth", name: "Fort Worth", isHome: false,
+      rooms: [
+        { id: "fw-c101", name: "Classroom 101", type: "classroom", devices: [
+          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.3.1.100", status: "offline", autoTrack: false, power: false, panPos: 0, tiltPos: 0, zoomPos: 0, sessionActive: false, controlClaimed: false },
+          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.3.1.101", status: "online", power: true, cpu: 18, mem: 50 },
+          { id: "tv-1", type: "display", brand: "LG", model: "UL3J 55\"", ip: "10.3.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]},
+        { id: "fw-conf-1", name: "Conference 1", type: "conference", devices: [
+          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.3.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]}
+      ]
+    },
+    {
+      id: "dc", name: "Washington DC", isHome: false,
+      rooms: [
+        { id: "dc-c101", name: "Classroom 101", type: "classroom", devices: [
+          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.4.1.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
+          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.4.1.101", status: "online", power: true, cpu: 11, mem: 40 },
+          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.4.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]},
+        { id: "dc-conf-1", name: "Conference 1", type: "conference", devices: [
+          { id: "tv-1", type: "display", brand: "LG", model: "UL3J 65\"", ip: "10.4.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]}
+      ]
+    },
+    {
+      id: "austin", name: "Austin", isHome: false,
+      rooms: [
+        { id: "au-c101", name: "Classroom 101", type: "classroom", devices: [
+          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.5.1.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
+          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.5.1.101", status: "online", power: true, cpu: 6, mem: 31 },
+          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.5.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]},
+        { id: "au-conf-1", name: "Conference 1", type: "conference", devices: [
+          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 55\"", ip: "10.5.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
+        ]}
+      ]
+    }
+  ]
+};
+
+// ══════════════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════════════
+
+let state = {
+  activeCampusId: null,
+  currentView: 'dashboard', // 'dashboard' | 'room'
+  currentRoomId: null,
+  dismissedBanner: false
+};
+
+// ══════════════════════════════════════════════
+//  HELPERS
+// ══════════════════════════════════════════════
+
+function getDeviceIssues(device) {
+  const issues = [];
+  if (device.status === 'offline') issues.push('Device offline');
+  if (device.type === 'display' && device.power === false) issues.push('Powered off');
+  if (device.type === 'display' && device.currentInput !== device.correctInput) issues.push(`Wrong input (${device.currentInput}, expected ${device.correctInput})`);
+  if (device.type === 'camera' && device.power === false) issues.push('Camera off');
+  if (device.type === 'nuc' && device.power === false) issues.push('NUC off');
+  if (device.type === 'nuc' && device.cpu > 80) issues.push('High CPU');
+  if (device.type === 'rally-bar' && device.power === false) issues.push('Rally Bar off');
+  if (device.type === 'tap' && device.power === false) issues.push('Tap off');
+  if (device.type === 'sight' && device.power === false) issues.push('Sight off');
+  if (device.type === 'audio' && device.power === false) issues.push('Audio off');
+  if (device.type === 'network-switch' && device.ports) {
+    const downPorts = device.ports.filter(p => !p.up);
+    if (downPorts.length > 0) issues.push(`${downPorts.length} port(s) down`);
+  }
+  return issues;
+}
+
+function getRoomHealth(room) {
+  let totalIssues = 0;
+  room.devices.forEach(d => { totalIssues += getDeviceIssues(d).length; });
+  if (totalIssues === 0) return 'green';
+  if (totalIssues <= 2) return 'yellow';
+  return 'red';
+}
+
+function getRoomIssueCount(room) {
+  let count = 0;
+  room.devices.forEach(d => { count += getDeviceIssues(d).length; });
+  return count;
+}
+
+function getCampusIssueCount(campus) {
+  let count = 0;
+  campus.rooms.forEach(r => { count += getRoomIssueCount(r); });
+  return count;
+}
+
+function getDeviceStatusColor(device) {
+  return getDeviceIssues(device).length > 0 ? 'red' : 'green';
+}
+
+function deviceIcon(type) {
+  const icons = {
+    camera: '&#9673;',          // camera
+    nuc: '&#9634;',             // computer
+    'network-switch': '&#8644;', // switch
+    display: '&#9632;',         // screen
+    'rally-bar': '&#9654;',     // video bar
+    tap: '&#9641;',             // touch controller
+    sight: '&#9673;',           // AI camera
+    audio: '&#9835;'            // audio
+  };
+  return icons[type] || '&#9679;';
+}
+
+function deviceTypeName(type) {
+  const names = {
+    camera: 'Camera', nuc: 'Computer', 'network-switch': 'Switch', display: 'Display',
+    'rally-bar': 'Rally Bar', tap: 'Tap Controller', sight: 'Sight Camera', audio: 'Audio'
+  };
+  return names[type] || type;
+}
+
+// ══════════════════════════════════════════════
+//  RENDER: SIDEBAR
+// ══════════════════════════════════════════════
+
+function renderSidebar() {
+  const el = document.getElementById('campusList');
+  el.innerHTML = CONFIG.campuses.map(c => {
+    const issues = getCampusIssueCount(c);
+    const active = c.id === state.activeCampusId;
+    const badgeClass = issues === 0 ? 'badge-green' : issues <= 3 ? 'badge-yellow' : 'badge-red';
+    const badgeText = issues === 0 ? '&#10003;' : `${issues}`;
+    return `
+      <div class="campus-item ${active ? 'active' : ''}" onclick="switchCampus('${c.id}')">
+        <div class="campus-item-left">
+          <span class="campus-name">${c.name}</span>
+          ${c.isHome ? '<span class="campus-home-badge">HOME</span>' : ''}
+        </div>
+        <span class="campus-badge ${badgeClass}">${badgeText}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════
+//  RENDER: ALERT BANNER
+// ══════════════════════════════════════════════
+
+function renderBanner() {
+  if (state.dismissedBanner) return;
+  const banner = document.getElementById('alertBanner');
+  const homeCampus = CONFIG.campuses.find(c => c.isHome);
+  const otherIssues = CONFIG.campuses
+    .filter(c => !c.isHome)
+    .filter(c => getCampusIssueCount(c) > 0);
+
+  if (otherIssues.length > 0) {
+    const text = otherIssues.map(c => `${c.name}: ${getCampusIssueCount(c)} issue(s)`).join(' &middot; ');
+    document.getElementById('alertBannerText').innerHTML = text;
+    banner.classList.add('visible');
+  } else {
+    banner.classList.remove('visible');
+  }
+}
+
+function dismissBanner() {
+  state.dismissedBanner = true;
+  document.getElementById('alertBanner').classList.remove('visible');
+}
+
+// ══════════════════════════════════════════════
+//  RENDER: DASHBOARD (Level 1)
+// ══════════════════════════════════════════════
+
+function renderDashboard() {
+  const campus = CONFIG.campuses.find(c => c.id === state.activeCampusId);
+  if (!campus) return;
+
+  const classrooms = campus.rooms.filter(r => r.type === 'classroom');
+  const conferences = campus.rooms.filter(r => r.type === 'conference');
+
+  const totalIssues = getCampusIssueCount(campus);
+  const healthyRooms = campus.rooms.filter(r => getRoomIssueCount(r) === 0).length;
+
+  const main = document.getElementById('mainContent');
+  main.innerHTML = `
+    <div class="page-header">
+      <h1>${campus.name} Campus</h1>
+      <div class="page-header-stats">
+        <div class="stat-chip">
+          <div class="stat-dot" style="background: var(--green)"></div>
+          ${healthyRooms} Healthy
+        </div>
+        <div class="stat-chip">
+          <div class="stat-dot" style="background: ${totalIssues > 0 ? 'var(--red)' : 'var(--green)'}"></div>
+          ${totalIssues} Issue${totalIssues !== 1 ? 's' : ''}
+        </div>
+        <div class="stat-chip">
+          ${campus.rooms.length} Rooms
+        </div>
+      </div>
+    </div>
+
+    <div class="section-header">
+      <h2>Classrooms</h2>
+      <span class="section-count">${classrooms.length}</span>
+    </div>
+    <div class="room-grid">
+      ${classrooms.map(r => renderRoomCard(r)).join('')}
+    </div>
+
+    ${conferences.length > 0 ? `
+      <hr class="section-divider">
+      <div class="section-header">
+        <h2>Conference Rooms</h2>
+        <span class="section-count">${conferences.length}</span>
+      </div>
+      <div class="room-grid">
+        ${conferences.map(r => renderRoomCard(r)).join('')}
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderRoomCard(room) {
+  const health = getRoomHealth(room);
+  const issues = getRoomIssueCount(room);
+  const statusIcons = { green: '&#10003;', yellow: '&#9888;', red: '&#10007;' };
+
+  return `
+    <div class="room-card" onclick="openRoom('${room.id}')">
+      <div class="room-card-status-bar ${health}"></div>
+      <div class="room-card-top">
+        <span class="room-card-name">${room.name}</span>
+        <div class="room-card-status-icon status-icon-${health}">
+          ${statusIcons[health]}
+        </div>
+      </div>
+      <div class="room-card-devices">
+        ${room.devices.map(d => {
+          const color = getDeviceStatusColor(d) === 'green' ? 'var(--green)' : 'var(--red)';
+          return `<div class="room-device-pip" style="background:${color}" title="${deviceTypeName(d.type)}: ${d.brand}"></div>`;
+        }).join('')}
+      </div>
+      ${issues > 0 ? `<div class="room-card-issues">${issues} issue${issues !== 1 ? 's' : ''}</div>` : ''}
+    </div>
+  `;
+}
+
+// ══════════════════════════════════════════════
+//  RENDER: ROOM DETAIL (Level 2)
+// ══════════════════════════════════════════════
+
+function renderRoomDetail(roomId) {
+  const campus = CONFIG.campuses.find(c => c.id === state.activeCampusId);
+  const room = campus.rooms.find(r => r.id === roomId);
+  if (!room) return;
+
+  const main = document.getElementById('mainContent');
+  main.innerHTML = `
+    <button class="back-btn" onclick="goBack()">&#8592; Back to ${campus.name}</button>
+    <div class="room-detail-header">
+      <h1>${room.name}</h1>
+      <span class="room-detail-campus">${campus.name}</span>
+      <span class="campus-badge badge-${getRoomHealth(room)}" style="font-size:12px;">
+        ${getRoomIssueCount(room) === 0 ? 'All Clear' : getRoomIssueCount(room) + ' issue(s)'}
+      </span>
+    </div>
+    <div class="device-grid">
+      ${room.devices.map(d => renderDeviceCard(d)).join('')}
+    </div>
+  `;
+}
+
+function renderDeviceCard(device) {
+  const issues = getDeviceIssues(device);
+  const statusColor = issues.length > 0 ? 'red' : 'green';
+  const statusText = issues.length > 0 ? issues[0] : 'Online';
+  const badgeClass = statusColor === 'green' ? 'badge-green' : 'badge-red';
+
+  let body = '';
+
+  if (device.type === 'camera') {
+    body = renderCameraBody(device);
+  } else if (device.type === 'nuc') {
+    body = renderNucBody(device);
+  } else if (device.type === 'network-switch') {
+    body = renderSwitchBody(device);
+  } else if (device.type === 'display') {
+    body = renderDisplayBody(device);
+  } else if (device.type === 'rally-bar' || device.type === 'tap' || device.type === 'sight' || device.type === 'audio') {
+    body = renderSimpleDeviceBody(device);
+  }
+
+  return `
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-card-header-left">
+          <div class="device-icon">${deviceIcon(device.type)}</div>
+          <div>
+            <div class="device-name">${deviceTypeName(device.type)} — ${device.brand}</div>
+            <div class="device-model">${device.model || ''} &middot; ${device.ip}</div>
+          </div>
+        </div>
+        <span class="device-status-badge ${badgeClass}">${statusText}</span>
+      </div>
+      <div class="device-card-body">
+        ${body}
+      </div>
+    </div>
+  `;
+}
+
+function renderCameraBody(device) {
+  const isOnline = device.status === 'online';
+  const isTransitioning = device.powerTransition != null;
+
+  // Livescope status display
+  const lsCode = device.livescopeStatus || 0;
+  let lsClass = 'cam-livescope-ok';
+  let lsText = `Livescope: ${lsCode} OK`;
+  if (!isOnline) { lsClass = 'cam-livescope-err'; lsText = 'Livescope: Unreachable'; }
+  else if (lsCode === 301) { lsClass = 'cam-livescope-warn'; lsText = 'Livescope: 301 — In use by another client'; }
+  else if (lsCode === 503) { lsClass = 'cam-livescope-warn'; lsText = 'Livescope: 503 — Too many clients'; }
+  else if (lsCode === 509) { lsClass = 'cam-livescope-warn'; lsText = 'Livescope: 509 — Standby'; }
+  else if (lsCode === 510) { lsClass = 'cam-livescope-warn'; lsText = 'Livescope: 510 — Entering standby...'; }
+  else if (lsCode === 511) { lsClass = 'cam-livescope-warn'; lsText = 'Livescope: 511 — Waking up...'; }
+  else if (lsCode === 507) { lsClass = 'cam-livescope-err'; lsText = 'Livescope: 507 — Auth failed'; }
+
+  // Power state text
+  let powerLabel = device.power ? 'Standby' : 'Wake';
+  let powerBtnClass = device.power ? 'ctrl-btn-red' : 'ctrl-btn-green';
+  if (device.powerTransition === 'standby-pending') { powerLabel = 'Entering Standby...'; powerBtnClass = 'ctrl-btn-neutral'; }
+  else if (device.powerTransition === 'waking') { powerLabel = 'Waking Up...'; powerBtnClass = 'ctrl-btn-neutral'; }
+
+  return `
+    <div class="camera-feed">
+      ${isOnline ? '<button class="cam-snapshot-btn" title="image.cgi?w=1 — single JPEG frame">&#128247; Snapshot</button>' : ''}
+      ${isTransitioning ? `
+        <div class="cam-transition-overlay">
+          <div class="cam-transition-spinner"></div>
+          <span>${device.powerTransition === 'waking' ? 'Camera starting up...' : 'Camera shutting down...'}</span>
+        </div>
+      ` : ''}
+      <div class="camera-feed-placeholder">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="5" width="15" height="14" rx="2"/>
+          <polygon points="22,7 17,12 22,17"/>
+        </svg>
+        <span>${!isOnline ? 'Camera Offline' : 'MJPEG Stream — video.cgi?w=1'}</span>
+      </div>
+    </div>
+
+    <!-- Livescope Status -->
+    <div class="cam-livescope-bar ${lsClass}">
+      <span>${lsText}</span>
+    </div>
+
+    <!-- Session & Control (XC Protocol) -->
+    <div class="cam-session-bar">
+      <div class="cam-session-bar-left">
+        <div class="cam-session-dot" style="background: ${isOnline ? 'var(--green)' : 'var(--red)'}"></div>
+        <span>${isOnline ? 'XC Protocol' : 'Unreachable'}</span>
+        <span style="color:var(--text-muted); font-size:11px;">${device.auth && device.auth.enabled ? '&#128274; Auth' : '&#128275; Open'}</span>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="ctrl-btn ctrl-btn-blue" style="padding:4px 10px; font-size:11px;" title="open.cgi → claim.cgi (exclusive PTZ control)">
+          ${device.controlClaimed ? '&#9679; Control Claimed' : '&#9675; Claim Control'}
+        </button>
+        <button class="ctrl-btn ctrl-btn-neutral" style="padding:4px 10px; font-size:11px;" title="yield.cgi → close.cgi">
+          Release
+        </button>
+      </div>
+    </div>
+
+    <!-- PTZ Position Readout (from info.cgi) -->
+    <div class="cam-pos-bar">
+      <div class="cam-pos-item">Pan <span class="cam-pos-value">${isOnline ? device.panPos + '&deg;' : '—'}</span></div>
+      <div class="cam-pos-item">Tilt <span class="cam-pos-value">${isOnline ? device.tiltPos + '&deg;' : '—'}</span></div>
+      <div class="cam-pos-item">Zoom <span class="cam-pos-value">${isOnline ? device.zoomPos + '%' : '—'}</span></div>
+    </div>
+
+    <!-- PTZ Controls (control.cgi) -->
+    <div class="ptz-controls">
+      <div></div>
+      <button class="ptz-btn" title="Tilt Up — control.cgi">&#9650;</button>
+      <div></div>
+      <button class="ptz-btn" title="Pan Left — control.cgi">&#9664;</button>
+      <button class="ptz-btn ptz-center" title="Home Preset — control.cgi">&#8962;</button>
+      <button class="ptz-btn" title="Pan Right — control.cgi">&#9654;</button>
+      <div></div>
+      <button class="ptz-btn" title="Tilt Down — control.cgi">&#9660;</button>
+      <div></div>
+    </div>
+    <div class="zoom-controls">
+      <button class="zoom-btn" title="Zoom Out — control.cgi">&minus;</button>
+      <button class="zoom-btn" title="Zoom In — control.cgi">&plus;</button>
+    </div>
+
+    <!-- Camera Actions -->
+    <div class="control-row">
+      <button class="ctrl-btn ${device.autoTrack ? 'ctrl-btn-active' : 'ctrl-btn-green'}" title="Auto-tracking via control.cgi">
+        &#9678; Auto-Track ${device.autoTrack ? 'ON' : 'OFF'}
+      </button>
+      <button class="ctrl-btn ${powerBtnClass}" title="standby.cgi?cmd=${device.power ? 'on' : 'off'}">
+        &#9211; ${powerLabel}
+      </button>
+    </div>
+
+    <!-- API Reference -->
+    <div class="cam-api-info">
+      <span>XC Protocol v011 &middot; Canon ${device.model}</span>
+      <span>Status: <code>info.cgi</code> &middot; PTZ: <code>control.cgi</code> &middot; Stream: <code>video.cgi?w=1</code></span>
+      <span>Power: <code>standby.cgi</code> &middot; Snap: <code>image.cgi?w=1</code></span>
+      <span>Session: <code>open → claim → yield → close</code></span>
+    </div>
+  `;
+}
+
+function renderNucBody(device) {
+  const cpuClass = device.cpu > 80 ? 'error' : device.cpu > 60 ? 'warn' : 'ok';
+  const memClass = device.mem > 80 ? 'error' : device.mem > 60 ? 'warn' : 'ok';
+
+  return `
+    <div class="metrics-grid">
+      <div class="metric-item">
+        <div class="metric-label">CPU Usage</div>
+        <div class="metric-value ${cpuClass}">${device.power ? device.cpu + '%' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Memory</div>
+        <div class="metric-value ${memClass}">${device.power ? device.mem + '%' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Power</div>
+        <div class="metric-value ${device.power ? 'ok' : 'error'}">${device.power ? 'On' : 'Off'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Status</div>
+        <div class="metric-value ${device.status === 'online' ? 'ok' : 'error'}">${device.status === 'online' ? 'Reachable' : 'Unreachable'}</div>
+      </div>
+    </div>
+    <div class="control-row">
+      <button class="ctrl-btn ctrl-btn-red" title="Reboot NUC">&#8635; Reboot</button>
+      <button class="ctrl-btn ${device.power ? 'ctrl-btn-red' : 'ctrl-btn-green'}">
+        &#9211; Power ${device.power ? 'Off' : 'On'}
+      </button>
+    </div>
+  `;
+}
+
+function renderSwitchBody(device) {
+  return `
+    <div class="port-grid">
+      ${(device.ports || []).map(p => {
+        const color = p.up ? 'var(--green)' : 'var(--red)';
+        return `
+          <div class="port-item" style="border: 1px solid ${color}">
+            <div class="port-num">Port ${p.num}</div>
+            <div style="color: ${color}; font-size: 14px;">${p.up ? '&#9679;' : '&#9675;'}</div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+    <div style="font-size: 12px; color: var(--text-muted);">Read-only &middot; SNMP monitoring</div>
+  `;
+}
+
+function renderDisplayBody(device) {
+  const isCorrect = device.currentInput === device.correctInput;
+  const inputs = ['HDMI1', 'HDMI2', 'HDMI3', 'DP1'];
+
+  return `
+    <div class="input-display ${isCorrect ? 'correct' : 'incorrect'}">
+      <div>
+        <div class="input-label">Current Input</div>
+        <div class="input-value ${isCorrect ? 'correct' : 'incorrect'}">${device.currentInput} ${isCorrect ? '&#10003;' : '&#10007;'}</div>
+        ${!isCorrect ? `<div class="input-expected">Expected: ${device.correctInput}</div>` : ''}
+      </div>
+    </div>
+    <div class="input-buttons">
+      ${inputs.map(inp => `
+        <button class="input-btn ${device.currentInput === inp ? 'active' : ''}">${inp}</button>
+      `).join('')}
+    </div>
+    <div class="control-row">
+      <button class="ctrl-btn ${device.power ? 'ctrl-btn-red' : 'ctrl-btn-green'}">
+        &#9211; Power ${device.power ? 'Off' : 'On'}
+      </button>
+    </div>
+  `;
+}
+
+function renderSimpleDeviceBody(device) {
+  const metrics = [];
+  if (device.type === 'rally-bar') {
+    metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
+    metrics.push({ label: 'In Call', value: device.inCall ? 'Yes' : 'No', cls: device.inCall ? 'warn' : 'ok' });
+    metrics.push({ label: 'Firmware', value: device.firmware || '—', cls: 'ok' });
+    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
+  } else if (device.type === 'tap') {
+    metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
+    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
+  } else if (device.type === 'sight') {
+    metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
+    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
+  } else if (device.type === 'audio') {
+    metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
+    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
+  }
+
+  return `
+    <div class="metrics-grid">
+      ${metrics.map(m => `
+        <div class="metric-item">
+          <div class="metric-label">${m.label}</div>
+          <div class="metric-value ${m.cls}">${m.value}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="control-row">
+      <button class="ctrl-btn ${device.power ? 'ctrl-btn-red' : 'ctrl-btn-green'}">
+        &#9211; Power ${device.power ? 'Off' : 'On'}
+      </button>
+    </div>
+  `;
+}
+
+// ══════════════════════════════════════════════
+//  NAVIGATION
+// ══════════════════════════════════════════════
+
+function switchCampus(campusId) {
+  state.activeCampusId = campusId;
+  state.currentView = 'dashboard';
+  state.currentRoomId = null;
+  window.location.hash = campusId;
+  render();
+}
+
+function openRoom(roomId) {
+  state.currentView = 'room';
+  state.currentRoomId = roomId;
+  window.location.hash = `${state.activeCampusId}/${roomId}`;
+  render();
+}
+
+function goBack() {
+  state.currentView = 'dashboard';
+  state.currentRoomId = null;
+  window.location.hash = state.activeCampusId;
+  render();
+}
+
+// ══════════════════════════════════════════════
+//  RENDER ORCHESTRATOR
+// ══════════════════════════════════════════════
+
+function render() {
+  renderSidebar();
+  renderBanner();
+  if (state.currentView === 'room' && state.currentRoomId) {
+    renderRoomDetail(state.currentRoomId);
+  } else {
+    renderDashboard();
+  }
+}
+
+// ══════════════════════════════════════════════
+//  HASH ROUTING
+// ══════════════════════════════════════════════
+
+function parseHash() {
+  const hash = window.location.hash.replace('#', '');
+  if (!hash) return;
+  const parts = hash.split('/');
+  const campusId = parts[0];
+  const roomId = parts[1] || null;
+  if (CONFIG.campuses.find(c => c.id === campusId)) {
+    state.activeCampusId = campusId;
+    if (roomId) {
+      state.currentView = 'room';
+      state.currentRoomId = roomId;
+    } else {
+      state.currentView = 'dashboard';
+      state.currentRoomId = null;
+    }
+  }
+}
+
+// ══════════════════════════════════════════════
+//  REFRESH TIMER
+// ══════════════════════════════════════════════
+
+let lastRefreshTime = Date.now();
+setInterval(() => {
+  lastRefreshTime = Date.now();
+  document.getElementById('lastRefresh').textContent = 'Updated just now';
+  // In production: fetch device statuses here and re-render
+  render();
+}, 30000);
+
+setInterval(() => {
+  const seconds = Math.floor((Date.now() - lastRefreshTime) / 1000);
+  if (seconds >= 5) {
+    document.getElementById('lastRefresh').textContent = `Updated ${seconds}s ago`;
+  }
+}, 5000);
+
+// ══════════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════════
+
+(function init() {
+  // Default to home campus
+  const homeCampus = CONFIG.campuses.find(c => c.isHome);
+  state.activeCampusId = homeCampus ? homeCampus.id : CONFIG.campuses[0].id;
+
+  // Parse URL hash if present
+  parseHash();
+
+  // Listen for hash changes
+  window.addEventListener('hashchange', () => {
+    parseHash();
+    render();
+  });
+
+  render();
+})();
+</script>
+
+</body>
+</html>
