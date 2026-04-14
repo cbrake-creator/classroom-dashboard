@@ -1324,13 +1324,24 @@ function renderCameraBody(device) {
           <span>${device.powerTransition === 'waking' ? 'Camera starting up...' : 'Camera shutting down...'}</span>
         </div>
       ` : ''}
-      <div class="camera-feed-placeholder">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <rect x="2" y="5" width="15" height="14" rx="2"/>
-          <polygon points="22,7 17,12 22,17"/>
-        </svg>
-        <span>${!isOnline ? 'Camera Offline' : 'MJPEG Stream — video.cgi?w=1'}</span>
-      </div>
+      ${isOnline
+        ? `<img class="cam-preview" data-deviceid="${device.id}" alt="Live preview" style="width:100%; height:100%; object-fit:cover; display:block; background:#000;"
+             src="${BACKEND_URL}/api/canon/${device.id}/snapshot?t=${Date.now()}"
+             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+           <div class="camera-feed-placeholder" style="display:none;">
+             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+               <rect x="2" y="5" width="15" height="14" rx="2"/>
+               <polygon points="22,7 17,12 22,17"/>
+             </svg>
+             <span>Preview unavailable</span>
+           </div>`
+        : `<div class="camera-feed-placeholder">
+             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+               <rect x="2" y="5" width="15" height="14" rx="2"/>
+               <polygon points="22,7 17,12 22,17"/>
+             </svg>
+             <span>Camera Offline</span>
+           </div>`}
     </div>
 
     <!-- Livescope Status -->
@@ -1917,6 +1928,16 @@ async function bootstrap() {
     parseHash();
     render();
   });
+
+  // Live camera previews — refresh every ~2s by reloading each visible <img class="cam-preview">
+  // with a cache-busting timestamp. Cheap and uses the existing /snapshot endpoint.
+  setInterval(() => {
+    document.querySelectorAll('img.cam-preview').forEach((img) => {
+      const id = img.getAttribute('data-deviceid');
+      if (!id) return;
+      img.src = `${BACKEND_URL}/api/canon/${id}/snapshot?t=${Date.now()}`;
+    });
+  }, 2000);
 }
 
 bootstrap();
