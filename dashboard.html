@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Classroom Technology Health Dashboard</title>
+<!-- Backend host injection point. Empty = same-origin (local dev or WP reverse proxy).
+     A future host can pre-inject `window.BACKEND_URL = 'https://av-backend.dts.internal'`
+     before this file loads to point at a remote backend without touching this code. -->
+<script>window.BACKEND_URL = window.BACKEND_URL || '';</script>
+<script src="/socket.io/socket.io.js"></script>
 <style>
   :root {
     --bg-primary: #0f1117;
@@ -85,6 +90,10 @@
     border-radius: 50%;
     background: var(--green);
     animation: pulse 2s infinite;
+  }
+  .refresh-dot.disconnected {
+    background: var(--red);
+    animation: none;
   }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
@@ -678,6 +687,146 @@
   /* ── SVG Icons ── */
   .icon { display: inline-block; vertical-align: middle; }
 
+  /* ── Studio (Faculty Podcast) ── */
+  .studio-session-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .studio-session-bar.live {
+    background: rgba(239,68,68,0.08);
+    border-color: var(--red-border);
+  }
+  .studio-session-bar-left { display: flex; align-items: center; gap: 14px; }
+  .studio-live-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--gray);
+  }
+  .studio-session-bar.live .studio-live-dot {
+    background: var(--red);
+    animation: pulse 1.5s infinite;
+  }
+  .studio-session-title { font-size: 16px; font-weight: 700; }
+  .studio-session-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .studio-session-actions { display: flex; gap: 8px; }
+
+  /* Pearl card */
+  .pearl-state-row {
+    display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;
+  }
+  .pearl-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 12px;
+    font-size: 11px; font-weight: 600;
+    background: var(--bg-primary); border: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .pearl-pill.rec { background: var(--red-bg); color: var(--red); border-color: var(--red-border); }
+  .pearl-pill.rec .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--red); animation: pulse 1.5s infinite;
+  }
+  .pearl-pill.stream { background: var(--blue-bg); color: var(--blue); border-color: rgba(59,130,246,0.3); }
+  .pearl-pill.idle { background: var(--gray-bg); color: var(--text-muted); border-color: var(--gray-border); }
+  .pearl-channel-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .pearl-channel {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; background: var(--bg-primary);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 12px;
+  }
+  .pearl-channel-name { font-weight: 600; color: var(--text-primary); }
+  .pearl-channel-meta { color: var(--text-muted); font-family: 'SF Mono', monospace; font-size: 11px; }
+  .pearl-source-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr);
+    gap: 6px; margin-bottom: 12px;
+  }
+  .pearl-source-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: var(--radius-sm);
+    background: var(--bg-primary); border: 1px solid var(--border);
+  }
+  .pearl-source-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .pearl-source-dot.up { background: var(--green); }
+  .pearl-source-dot.down { background: var(--gray); }
+  .pearl-source-text { display: flex; flex-direction: column; min-width: 0; }
+  .pearl-source-name { font-weight: 600; color: var(--text-primary); font-size: 11px; }
+  .pearl-source-label { color: var(--text-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Mac card */
+  .mac-apps-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  .mac-app-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 10px; background: var(--bg-primary);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 12px;
+  }
+  .mac-app-left { display: flex; align-items: center; gap: 8px; }
+  .mac-app-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .mac-app-dot.up { background: var(--green); }
+  .mac-app-dot.down { background: var(--red); }
+  .mac-app-pid { color: var(--text-muted); font-family: 'SF Mono', monospace; font-size: 10px; }
+  .mac-app-restart {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-secondary); font-size: 10px;
+    padding: 2px 8px; border-radius: 4px; cursor: pointer;
+  }
+  .mac-app-restart:hover { border-color: var(--blue); color: var(--blue); }
+  .mac-audio-row {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 10px 12px; background: var(--bg-primary);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    margin-bottom: 12px; font-size: 12px;
+  }
+  .mac-audio-line { display: flex; justify-content: space-between; }
+  .mac-audio-line .label { color: var(--text-muted); }
+  .mac-audio-line .value { color: var(--text-primary); font-weight: 600; }
+
+  /* Rodecaster card */
+  .rcp-conn-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; background: var(--bg-primary);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 12px; margin-bottom: 12px;
+  }
+  .rcp-strip-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  .rcp-strip {
+    display: grid;
+    grid-template-columns: 110px 1fr 24px;
+    gap: 10px; align-items: center;
+    padding: 6px 10px; background: var(--bg-primary);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 11px;
+  }
+  .rcp-strip.muted .rcp-strip-name { color: var(--text-muted); text-decoration: line-through; }
+  .rcp-strip-name { font-weight: 600; color: var(--text-primary); }
+  .rcp-meter {
+    height: 6px; background: var(--bg-card);
+    border-radius: 3px; overflow: hidden; position: relative;
+  }
+  .rcp-meter-fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: linear-gradient(90deg, var(--green) 0%, var(--green) 60%, var(--yellow) 80%, var(--red) 100%);
+  }
+  .rcp-strip-icon { color: var(--text-muted); text-align: right; font-size: 12px; }
+
+  /* Limitations / dev note footer */
+  .device-note {
+    font-size: 11px;
+    color: var(--yellow);
+    background: var(--yellow-bg);
+    border: 1px solid var(--yellow-border);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    margin-top: 4px;
+    line-height: 1.4;
+  }
+
   /* ── Responsive ── */
   @media (max-width: 768px) {
     .sidebar { width: 60px; }
@@ -700,10 +849,10 @@
   </div>
   <div class="topbar-right">
     <div class="refresh-indicator">
-      <div class="refresh-dot"></div>
-      <span id="lastRefresh">Updated just now</span>
+      <div class="refresh-dot" id="refreshDot"></div>
+      <span id="lastRefresh">Connecting…</span>
     </div>
-    <span>Polling: 30s</span>
+    <span id="connState">Live</span>
   </div>
 </div>
 
@@ -730,193 +879,69 @@
 
 <script>
 // ══════════════════════════════════════════════
-//  MOCK DATA
+//  BACKEND WIRING
+//
+//  CONFIG used to be a static literal in this file.
+//  It is now hydrated from the backend's GET /api/rooms
+//  on first paint, then continuously patched by
+//  Socket.IO `device:update` events.
+//
+//  All device commands go through cmd(path, body) → POST.
+//  No business logic in the browser.
 // ══════════════════════════════════════════════
 
-// Helper to generate standard classroom devices
-function makeClassroom(id, name, subnet, tvCount, overrides) {
-  const base = `10.1.${subnet}`;
-  const devices = [
-    { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: `${base}.100`,
-      apiBase: `http://${base}.100/-wvhttp-01-`,
-      auth: { enabled: true, username: "admin", password: "env:CAM_PASS" },
-      status: "online", autoTrack: true, power: true,
-      panPos: 0, tiltPos: 0, zoomPos: 50,
-      sessionActive: false, controlClaimed: false,
-      livescopeStatus: 0, livescopeMsg: "OK",
-      powerTransition: null  // null | "standby-pending" | "waking"
-    },
-    { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: `${base}.101`, status: "online", power: true, cpu: Math.floor(Math.random()*30)+5, mem: Math.floor(Math.random()*30)+25 },
-    { id: "sw-1", type: "network-switch", brand: "Netgear", model: "M4250", ip: `${base}.102`, status: "online", ports: [
-      { num: 1, up: true }, { num: 2, up: true }, { num: 3, up: true }, { num: 4, up: true }, { num: 5, up: true }, { num: 6, up: true }
-    ]}
-  ];
-  const brands = ["Samsung", "LG", "Samsung", "Sony", "LG", "Samsung", "Sony"];
-  const models = ['QBR 65"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"'];
-  for (let i = 0; i < tvCount; i++) {
-    devices.push({ id: `tv-${i+1}`, type: "display", brand: brands[i % brands.length], model: models[i % models.length], ip: `${base}.${110+i}`, status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" });
-  }
-  const room = { id, name, type: "classroom", devices };
-  if (overrides) overrides(room);
-  return room;
-}
+const BACKEND_URL = window.BACKEND_URL || '';
 
-function makeConference(id, name, subnet, overrides) {
-  const base = `10.1.${subnet}`;
-  // Standard conference room: Rally Bar + Tap + Sight Triple
-  const devices = [
-    { id: "rally-bar-1", type: "rally-bar", brand: "Logitech", model: "Rally Bar", ip: `${base}.100`, status: "online", power: true, inCall: false, firmware: "1.12.150" },
-    { id: "tap-1", type: "tap", brand: "Logitech", model: "Tap", ip: `${base}.101`, status: "online", power: true },
-    { id: "sight-1", type: "sight", brand: "Logitech", model: "Sight Triple", ip: `${base}.102`, status: "online", power: true }
-  ];
-  const room = { id, name, type: "conference", devices };
-  if (overrides) overrides(room);
-  return room;
-}
+// CONFIG starts empty so render() can run before /api/rooms returns.
+let CONFIG = { campuses: [] };
 
-// Hybrid classroom: Rally Bar + Tap + Sight Triple + NUC + Switch + Displays (no Canon camera)
-function makeHybridClassroom(id, name, subnet, tvCount, overrides) {
-  const base = `10.1.${subnet}`;
-  const devices = [
-    { id: "rally-bar-1", type: "rally-bar", brand: "Logitech", model: "Rally Bar", ip: `${base}.100`, status: "online", power: true, inCall: false, firmware: "1.12.150" },
-    { id: "tap-1", type: "tap", brand: "Logitech", model: "Tap", ip: `${base}.101`, status: "online", power: true },
-    { id: "sight-1", type: "sight", brand: "Logitech", model: "Sight Triple", ip: `${base}.102`, status: "online", power: true },
-    { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: `${base}.103`, status: "online", power: true, cpu: Math.floor(Math.random()*30)+5, mem: Math.floor(Math.random()*30)+25 },
-    { id: "sw-1", type: "network-switch", brand: "Netgear", model: "M4250", ip: `${base}.104`, status: "online", ports: [
-      { num: 1, up: true }, { num: 2, up: true }, { num: 3, up: true }, { num: 4, up: true }, { num: 5, up: true }, { num: 6, up: true }
-    ]}
-  ];
-  const brands = ["Samsung", "LG", "Samsung", "Sony", "LG", "Samsung", "Sony"];
-  const models = ['QBR 65"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"', 'UL3J 55"', 'QBR 65"', 'BZ40J 55"'];
-  for (let i = 0; i < tvCount; i++) {
-    devices.push({ id: `tv-${i+1}`, type: "display", brand: brands[i % brands.length], model: models[i % models.length], ip: `${base}.${110+i}`, status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" });
-  }
-  const room = { id, name, type: "classroom", devices };
-  if (overrides) overrides(room);
-  return room;
-}
-
-const CONFIG = {
-  campuses: [
-    {
-      id: "dallas", name: "Dallas", isHome: true,
-      rooms: [
-        // ── Classrooms (21) ──
-        // Hybrid classrooms (Rally Bar + Tap + Sight + NUC + Switch + Displays, no Canon camera)
-        makeHybridClassroom("cac-201", "CAC 201", 33, 4),
-        makeHybridClassroom("cac-202", "CAC 202", 34, 4),
-        makeClassroom("cac-203", "CAC 203", 1, 7),
-        makeClassroom("cac-204", "CAC 204", 2, 4),
-        makeClassroom("cac-205", "CAC 205", 3, 4),
-        makeClassroom("cac-206", "CAC 206", 4, 4),
-        makeClassroom("cac-207", "CAC 207", 5, 4),
-        makeClassroom("cac-208", "CAC 208", 6, 4, r => {
-          // Demo issue: NUC offline
-          r.devices[1].status = "offline"; r.devices[1].power = false; r.devices[1].cpu = 0; r.devices[1].mem = 0;
-        }),
-        makeClassroom("cac-211", "CAC 211", 7, 4),
-        makeClassroom("todd-114", "Todd 114", 8, 4),
-        makeClassroom("todd-115", "Todd 115", 9, 4),
-        makeClassroom("todd-215", "Todd 215", 10, 4),
-        makeHybridClassroom("todd-216", "Todd 216", 35, 4),
-        makeClassroom("todd-217", "Todd 217", 11, 4, r => {
-          // Demo issue: switch port down, TV offline
-          r.devices[2].ports[3].up = false;
-          r.devices[4].status = "offline"; r.devices[4].power = false;
-        }),
-        makeClassroom("todd-218", "Todd 218", 12, 4),
-        makeClassroom("todd-313", "Todd 313", 13, 4),
-        makeClassroom("todd-315", "Todd 315", 14, 4),
-        makeClassroom("todd-317", "Todd 317", 15, 4),
-        makeClassroom("todd-320", "Todd 320", 16, 4),
-        makeHybridClassroom("wsc-333", "WSC 333", 36, 4),
-        makeHybridClassroom("wsc-334", "WSC 334", 37, 4),
-        // ── Conference Rooms (12) — Rally Bar + Tap + Sight Triple ──
-        makeConference("mosher-109", "Mosher 109", 20),
-        makeConference("mosher-110", "Mosher 110", 21),
-        makeConference("mosher-204", "Mosher 204", 22),
-        makeConference("mosher-205", "Mosher 205", 23, r => {
-          // Demo issue: Sight offline
-          r.devices[2].status = "offline"; r.devices[2].power = false;
-        }),
-        makeConference("stearns-208", "Stearns 208", 24),
-        makeConference("stearns-003", "Stearns 003", 25),
-        makeConference("wsc-108h", "WSC 108h", 26),
-        makeConference("wsc-206", "WSC 206", 27),
-        makeConference("horner-204", "Horner 204", 28),
-        makeConference("horner-304", "Horner 304", 29, r => {
-          // Horner 304 also has a NUC + Yamaha audio
-          r.devices.push(
-            { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.1.29.103", status: "online", power: true, cpu: Math.floor(Math.random()*20)+5, mem: Math.floor(Math.random()*20)+25 },
-            { id: "yamaha-1", type: "audio", brand: "Yamaha", model: "Audio System", ip: "10.1.29.104", status: "online", power: true }
-          );
-        }),
-        makeConference("mitchell-109e", "Mitchell 109E", 30),
-        makeConference("hendricks-207", "Hendricks 207 (Seay Library)", 31)
-      ]
-    },
-    {
-      id: "houston", name: "Houston", isHome: false,
-      rooms: [
-        { id: "h-c101", name: "Classroom 101", type: "classroom", devices: [
-          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.2.1.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
-          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.2.1.101", status: "online", power: true, cpu: 15, mem: 45 },
-          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.2.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" },
-          { id: "tv-2", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.2.1.111", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]},
-        { id: "h-c102", name: "Classroom 102", type: "classroom", devices: [
-          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.2.2.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
-          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.2.2.101", status: "online", power: true, cpu: 9, mem: 38 },
-          { id: "tv-1", type: "display", brand: "LG", model: "UL3J 55\"", ip: "10.2.2.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" },
-          { id: "tv-2", type: "display", brand: "LG", model: "UL3J 55\"", ip: "10.2.2.111", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]},
-        { id: "h-conf-1", name: "Conference 1", type: "conference", devices: [
-          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 75\"", ip: "10.2.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" },
-          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.2.10.101", status: "online", power: true, cpu: 4, mem: 20 }
-        ]}
-      ]
-    },
-    {
-      id: "fortworth", name: "Fort Worth", isHome: false,
-      rooms: [
-        { id: "fw-c101", name: "Classroom 101", type: "classroom", devices: [
-          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.3.1.100", status: "offline", autoTrack: false, power: false, panPos: 0, tiltPos: 0, zoomPos: 0, sessionActive: false, controlClaimed: false },
-          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.3.1.101", status: "online", power: true, cpu: 18, mem: 50 },
-          { id: "tv-1", type: "display", brand: "LG", model: "UL3J 55\"", ip: "10.3.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]},
-        { id: "fw-conf-1", name: "Conference 1", type: "conference", devices: [
-          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.3.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]}
-      ]
-    },
-    {
-      id: "dc", name: "Washington DC", isHome: false,
-      rooms: [
-        { id: "dc-c101", name: "Classroom 101", type: "classroom", devices: [
-          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.4.1.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
-          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.4.1.101", status: "online", power: true, cpu: 11, mem: 40 },
-          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.4.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]},
-        { id: "dc-conf-1", name: "Conference 1", type: "conference", devices: [
-          { id: "tv-1", type: "display", brand: "LG", model: "UL3J 65\"", ip: "10.4.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]}
-      ]
-    },
-    {
-      id: "austin", name: "Austin", isHome: false,
-      rooms: [
-        { id: "au-c101", name: "Classroom 101", type: "classroom", devices: [
-          { id: "cam-1", type: "camera", brand: "Canon", model: "CR-N300", ip: "10.5.1.100", status: "online", autoTrack: true, power: true, panPos: 0, tiltPos: 0, zoomPos: 50, sessionActive: false, controlClaimed: false },
-          { id: "nuc-1", type: "nuc", brand: "Intel", model: "NUC 12", ip: "10.5.1.101", status: "online", power: true, cpu: 6, mem: 31 },
-          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 65\"", ip: "10.5.1.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]},
-        { id: "au-conf-1", name: "Conference 1", type: "conference", devices: [
-          { id: "tv-1", type: "display", brand: "Samsung", model: "QBR 55\"", ip: "10.5.10.110", status: "online", power: true, currentInput: "HDMI1", correctInput: "HDMI1" }
-        ]}
-      ]
+async function cmd(path, body) {
+  try {
+    const res = await fetch(`${BACKEND_URL}${path}`, {
+      method: 'POST',
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.warn('cmd failed', path, res.status, text);
     }
-  ]
-};
+    return res.ok;
+  } catch (err) {
+    console.warn('cmd error', path, err);
+    return false;
+  }
+}
+
+// Patch a device in CONFIG by id (campusId + roomId scope guards against id collisions
+// between rooms — e.g. cam-1 in multiple rooms).
+function patchDeviceInConfig(campusId, roomId, device) {
+  const campus = CONFIG.campuses.find(c => c.id === campusId);
+  if (!campus) return false;
+  const room = campus.rooms.find(r => r.id === roomId);
+  if (!room) return false;
+  const idx = room.devices.findIndex(d => d.id === device.id);
+  if (idx < 0) return false;
+  room.devices[idx] = device;
+  return true;
+}
+
+function setConnState(connected) {
+  const dot = document.getElementById('refreshDot');
+  const label = document.getElementById('lastRefresh');
+  const conn = document.getElementById('connState');
+  if (!dot || !label || !conn) return;
+  if (connected) {
+    dot.classList.remove('disconnected');
+    label.textContent = 'Live';
+    conn.textContent = 'WebSocket';
+  } else {
+    dot.classList.add('disconnected');
+    label.textContent = 'Disconnected';
+    conn.textContent = 'Reconnecting…';
+  }
+}
+
 
 // ══════════════════════════════════════════════
 //  STATE
@@ -936,6 +961,7 @@ let state = {
 function getDeviceIssues(device) {
   const issues = [];
   if (device.status === 'offline') issues.push('Device offline');
+  if (device.status === 'unknown') issues.push('Status unknown (no live poll yet)');
   if (device.type === 'display' && device.power === false) issues.push('Powered off');
   if (device.type === 'display' && device.currentInput !== device.correctInput) issues.push(`Wrong input (${device.currentInput}, expected ${device.correctInput})`);
   if (device.type === 'camera' && device.power === false) issues.push('Camera off');
@@ -949,6 +975,21 @@ function getDeviceIssues(device) {
     const downPorts = device.ports.filter(p => !p.up);
     if (downPorts.length > 0) issues.push(`${downPorts.length} port(s) down`);
   }
+  if (device.type === 'pearl') {
+    if (device.cpu > 80) issues.push('Pearl CPU high');
+    if (device.temp && device.temp > 75) issues.push('Pearl temperature high');
+    if (device.storage && (device.storage.freeGb / device.storage.totalGb) < 0.10) issues.push('Pearl storage <10%');
+    (device.sources || []).forEach(s => {
+      if (!s.connected && s.label && s.label !== '—') issues.push(`Pearl source ${s.name} disconnected`);
+    });
+  }
+  if (device.type === 'mac') {
+    if (device.cpu > 80) issues.push('Mac CPU high');
+    if (device.mem > 85) issues.push('Mac memory high');
+    if (device.disk && (device.disk.freeGb / device.disk.totalGb) < 0.10) issues.push('Mac disk <10%');
+  }
+  if (device.type === 'rodecaster' && device.status === 'offline') issues.push('Rodecaster not detected on Mac USB');
+  if (device.type === 'daw' && !device.sidecarConnected) issues.push('DAW sidecar not connected');
   return issues;
 }
 
@@ -985,7 +1026,11 @@ function deviceIcon(type) {
     'rally-bar': '&#9654;',     // video bar
     tap: '&#9641;',             // touch controller
     sight: '&#9673;',           // AI camera
-    audio: '&#9835;'            // audio
+    audio: '&#9835;',           // audio
+    pearl: '&#9210;',           // encoder/recorder
+    mac: '&#63743;',            // mac (Apple logo PUA — falls back gracefully)
+    rodecaster: '&#9836;',      // mixer
+    daw: '&#9835;'              // DAW / console
   };
   return icons[type] || '&#9679;';
 }
@@ -993,7 +1038,8 @@ function deviceIcon(type) {
 function deviceTypeName(type) {
   const names = {
     camera: 'Camera', nuc: 'Computer', 'network-switch': 'Switch', display: 'Display',
-    'rally-bar': 'Rally Bar', tap: 'Tap Controller', sight: 'Sight Camera', audio: 'Audio'
+    'rally-bar': 'Rally Bar', tap: 'Tap Controller', sight: 'Sight Camera', audio: 'Audio',
+    pearl: 'Encoder', mac: 'Mac Studio', rodecaster: 'Mixer', daw: 'Studio DAW'
   };
   return names[type] || type;
 }
@@ -1057,6 +1103,7 @@ function renderDashboard() {
 
   const classrooms = campus.rooms.filter(r => r.type === 'classroom');
   const conferences = campus.rooms.filter(r => r.type === 'conference');
+  const studios = campus.rooms.filter(r => r.type === 'studio');
 
   const totalIssues = getCampusIssueCount(campus);
   const healthyRooms = campus.rooms.filter(r => getRoomIssueCount(r) === 0).length;
@@ -1096,6 +1143,17 @@ function renderDashboard() {
       </div>
       <div class="room-grid">
         ${conferences.map(r => renderRoomCard(r)).join('')}
+      </div>
+    ` : ''}
+
+    ${studios.length > 0 ? `
+      <hr class="section-divider">
+      <div class="section-header">
+        <h2>Studios</h2>
+        <span class="section-count">${studios.length}</span>
+      </div>
+      <div class="room-grid">
+        ${studios.map(r => renderRoomCard(r)).join('')}
       </div>
     ` : ''}
   `;
@@ -1145,8 +1203,45 @@ function renderRoomDetail(roomId) {
         ${getRoomIssueCount(room) === 0 ? 'All Clear' : getRoomIssueCount(room) + ' issue(s)'}
       </span>
     </div>
+    ${room.type === 'studio' ? renderStudioSessionBar(room) : ''}
     <div class="device-grid">
       ${room.devices.map(d => renderDeviceCard(d)).join('')}
+    </div>
+  `;
+}
+
+function getStudioSession(room) {
+  const pearl = room.devices.find(d => d.type === 'pearl');
+  if (!pearl) return { live: false, label: 'No Encoder', sub: 'No Pearl device in this room' };
+  const recording = (pearl.recorders || []).some(r => r.state === 'recording');
+  const streaming = (pearl.publishers || []).some(p => p.state === 'streaming');
+  if (recording && streaming) return { live: true, label: 'LIVE — Recording + Streaming', sub: 'Pearl encoder is recording to disk and pushing RTMP' };
+  if (recording) return { live: true, label: 'RECORDING', sub: 'Pearl recorder is active' };
+  if (streaming) return { live: true, label: 'STREAMING', sub: 'Pearl publisher is active' };
+  return { live: false, label: 'Idle', sub: 'No active recording or stream' };
+}
+
+function renderStudioSessionBar(room) {
+  const sess = getStudioSession(room);
+  const liveCls = sess.live ? 'live' : '';
+  const sessionPath = sess.live ? 'stop-session' : 'start-session';
+  return `
+    <div class="studio-session-bar ${liveCls}">
+      <div class="studio-session-bar-left">
+        <div class="studio-live-dot"></div>
+        <div>
+          <div class="studio-session-title">${sess.label}</div>
+          <div class="studio-session-sub">${sess.sub}</div>
+        </div>
+      </div>
+      <div class="studio-session-actions">
+        <button class="ctrl-btn ctrl-btn-${sess.live ? 'red' : 'green'}" onclick="cmd('/api/studio/${room.id}/${sessionPath}')" title="POST /api/studio/${room.id}/${sessionPath}">
+          ${sess.live ? '&#9632; Stop Session' : '&#9679; Start Session'}
+        </button>
+        <button class="ctrl-btn ctrl-btn-neutral" onclick="cmd('/api/studio/${room.id}/prep')" title="POST /api/studio/${room.id}/prep">
+          &#9881; Prep Studio
+        </button>
+      </div>
     </div>
   `;
 }
@@ -1169,6 +1264,14 @@ function renderDeviceCard(device) {
     body = renderDisplayBody(device);
   } else if (device.type === 'rally-bar' || device.type === 'tap' || device.type === 'sight' || device.type === 'audio') {
     body = renderSimpleDeviceBody(device);
+  } else if (device.type === 'pearl') {
+    body = renderPearlBody(device);
+  } else if (device.type === 'mac') {
+    body = renderMacBody(device);
+  } else if (device.type === 'rodecaster') {
+    body = renderRodecasterBody(device);
+  } else if (device.type === 'daw') {
+    body = renderDawBody(device);
   }
 
   return `
@@ -1177,7 +1280,7 @@ function renderDeviceCard(device) {
         <div class="device-card-header-left">
           <div class="device-icon">${deviceIcon(device.type)}</div>
           <div>
-            <div class="device-name">${deviceTypeName(device.type)} — ${device.brand}</div>
+            <div class="device-name">${device.label ? device.label + ' — ' : deviceTypeName(device.type) + ' — '}${device.brand}</div>
             <div class="device-model">${device.model || ''} &middot; ${device.ip}</div>
           </div>
         </div>
@@ -1214,7 +1317,7 @@ function renderCameraBody(device) {
 
   return `
     <div class="camera-feed">
-      ${isOnline ? '<button class="cam-snapshot-btn" title="image.cgi?w=1 — single JPEG frame">&#128247; Snapshot</button>' : ''}
+      ${isOnline ? `<button class="cam-snapshot-btn" onclick="window.open(BACKEND_URL + '/api/canon/${device.id}/snapshot', '_blank')" title="GET /api/canon/${device.id}/snapshot">&#128247; Snapshot</button>` : ''}
       ${isTransitioning ? `
         <div class="cam-transition-overlay">
           <div class="cam-transition-spinner"></div>
@@ -1243,10 +1346,10 @@ function renderCameraBody(device) {
         <span style="color:var(--text-muted); font-size:11px;">${device.auth && device.auth.enabled ? '&#128274; Auth' : '&#128275; Open'}</span>
       </div>
       <div style="display:flex; gap:6px;">
-        <button class="ctrl-btn ctrl-btn-blue" style="padding:4px 10px; font-size:11px;" title="open.cgi → claim.cgi (exclusive PTZ control)">
+        <button class="ctrl-btn ctrl-btn-blue" style="padding:4px 10px; font-size:11px;" onclick="cmd('/api/canon/${device.id}/claim')" title="POST /api/canon/${device.id}/claim">
           ${device.controlClaimed ? '&#9679; Control Claimed' : '&#9675; Claim Control'}
         </button>
-        <button class="ctrl-btn ctrl-btn-neutral" style="padding:4px 10px; font-size:11px;" title="yield.cgi → close.cgi">
+        <button class="ctrl-btn ctrl-btn-neutral" style="padding:4px 10px; font-size:11px;" onclick="cmd('/api/canon/${device.id}/release')" title="POST /api/canon/${device.id}/release">
           Release
         </button>
       </div>
@@ -1262,26 +1365,26 @@ function renderCameraBody(device) {
     <!-- PTZ Controls (control.cgi) -->
     <div class="ptz-controls">
       <div></div>
-      <button class="ptz-btn" title="Tilt Up — control.cgi">&#9650;</button>
+      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'tilt-up' })" title="Tilt Up">&#9650;</button>
       <div></div>
-      <button class="ptz-btn" title="Pan Left — control.cgi">&#9664;</button>
-      <button class="ptz-btn ptz-center" title="Home Preset — control.cgi">&#8962;</button>
-      <button class="ptz-btn" title="Pan Right — control.cgi">&#9654;</button>
+      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'pan-left' })" title="Pan Left">&#9664;</button>
+      <button class="ptz-btn ptz-center" onclick="cmd('/api/canon/${device.id}/home')" title="Home Preset">&#8962;</button>
+      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'pan-right' })" title="Pan Right">&#9654;</button>
       <div></div>
-      <button class="ptz-btn" title="Tilt Down — control.cgi">&#9660;</button>
+      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'tilt-down' })" title="Tilt Down">&#9660;</button>
       <div></div>
     </div>
     <div class="zoom-controls">
-      <button class="zoom-btn" title="Zoom Out — control.cgi">&minus;</button>
-      <button class="zoom-btn" title="Zoom In — control.cgi">&plus;</button>
+      <button class="zoom-btn" onclick="cmd('/api/canon/${device.id}/zoom', { direction: 'out' })" title="Zoom Out">&minus;</button>
+      <button class="zoom-btn" onclick="cmd('/api/canon/${device.id}/zoom', { direction: 'in' })" title="Zoom In">&plus;</button>
     </div>
 
     <!-- Camera Actions -->
     <div class="control-row">
-      <button class="ctrl-btn ${device.autoTrack ? 'ctrl-btn-active' : 'ctrl-btn-green'}" title="Auto-tracking via control.cgi">
+      <button class="ctrl-btn ${device.autoTrack ? 'ctrl-btn-active' : 'ctrl-btn-green'}" onclick="cmd('/api/canon/${device.id}/autotrack', { enabled: ${!device.autoTrack} })" title="POST /api/canon/${device.id}/autotrack">
         &#9678; Auto-Track ${device.autoTrack ? 'ON' : 'OFF'}
       </button>
-      <button class="ctrl-btn ${powerBtnClass}" title="standby.cgi?cmd=${device.power ? 'on' : 'off'}">
+      <button class="ctrl-btn ${powerBtnClass}" onclick="cmd('/api/canon/${device.id}/standby', { on: ${!!device.power} })" title="POST /api/canon/${device.id}/standby">
         &#9211; ${powerLabel}
       </button>
     </div>
@@ -1366,6 +1469,282 @@ function renderDisplayBody(device) {
       <button class="ctrl-btn ${device.power ? 'ctrl-btn-red' : 'ctrl-btn-green'}">
         &#9211; Power ${device.power ? 'Off' : 'On'}
       </button>
+    </div>
+  `;
+}
+
+function renderPearlBody(device) {
+  const isOnline = device.status === 'online';
+  const recording = (device.recorders || []).some(r => r.state === 'recording');
+  const streaming = (device.publishers || []).some(p => p.state === 'streaming');
+  const storagePctFree = device.storage ? Math.round((device.storage.freeGb / device.storage.totalGb) * 100) : 0;
+  const cpuClass = device.cpu > 80 ? 'error' : device.cpu > 60 ? 'warn' : 'ok';
+  const tempClass = device.temp > 75 ? 'error' : device.temp > 65 ? 'warn' : 'ok';
+  const storageClass = storagePctFree < 10 ? 'error' : storagePctFree < 25 ? 'warn' : 'ok';
+
+  return `
+    <!-- Encoder state pills -->
+    <div class="pearl-state-row">
+      ${recording
+        ? '<span class="pearl-pill rec"><span class="dot"></span>REC</span>'
+        : '<span class="pearl-pill idle">REC OFF</span>'}
+      ${streaming
+        ? '<span class="pearl-pill stream">&#9673; STREAMING</span>'
+        : '<span class="pearl-pill idle">STREAM OFF</span>'}
+      <span class="pearl-pill">FW ${device.firmware || '—'}</span>
+      <span class="pearl-pill">UP ${device.uptime || '—'}</span>
+    </div>
+
+    <!-- Channels (encoders) -->
+    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">Channels</div>
+    <div class="pearl-channel-list">
+      ${(device.channels || []).map(ch => `
+        <div class="pearl-channel">
+          <div>
+            <div class="pearl-channel-name">${ch.name}</div>
+            <div class="pearl-channel-meta">Layout: ${ch.currentLayout}</div>
+          </div>
+          <div class="pearl-channel-meta">${ch.fps}fps &middot; ${(ch.bitrateKbps/1000).toFixed(1)}Mbps</div>
+        </div>
+      `).join('')}
+    </div>
+
+    <!-- Sources -->
+    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">Inputs</div>
+    <div class="pearl-source-grid">
+      ${(device.sources || []).map(s => `
+        <div class="pearl-source-item">
+          <div class="pearl-source-dot ${s.connected ? 'up' : 'down'}"></div>
+          <div class="pearl-source-text">
+            <span class="pearl-source-name">${s.name}</span>
+            <span class="pearl-source-label">${s.label}</span>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+
+    <!-- System metrics -->
+    <div class="metrics-grid">
+      <div class="metric-item">
+        <div class="metric-label">CPU</div>
+        <div class="metric-value ${cpuClass}">${isOnline ? device.cpu + '%' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Temperature</div>
+        <div class="metric-value ${tempClass}">${isOnline ? device.temp + '&deg;C' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Storage Free</div>
+        <div class="metric-value ${storageClass}">${isOnline && device.storage ? storagePctFree + '%' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Storage</div>
+        <div class="metric-value ok" style="font-size:13px;">${device.storage ? device.storage.freeGb + ' / ' + device.storage.totalGb + ' GB' : '—'}</div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="control-row">
+      ${(device.recorders || []).map(r => `
+        <button class="ctrl-btn ${r.state === 'recording' ? 'ctrl-btn-red' : 'ctrl-btn-green'}"
+                onclick="cmd('/api/pearl/${device.id}/recorder/${r.id}/${r.state === 'recording' ? 'stop' : 'start'}')"
+                title="POST /api/pearl/${device.id}/recorder/${r.id}/${r.state === 'recording' ? 'stop' : 'start'}">
+          ${r.state === 'recording' ? '&#9632; Stop' : '&#9679; Rec'} ${r.name}
+        </button>
+      `).join('')}
+      ${(device.publishers || []).map(p => `
+        <button class="ctrl-btn ${p.state === 'streaming' ? 'ctrl-btn-red' : 'ctrl-btn-blue'}"
+                onclick="cmd('/api/pearl/${device.id}/channel/${p.channelId}/publisher/${p.id}/${p.state === 'streaming' ? 'stop' : 'start'}')"
+                title="POST /api/pearl/${device.id}/channel/${p.channelId}/publisher/${p.id}/${p.state === 'streaming' ? 'stop' : 'start'}">
+          ${p.state === 'streaming' ? '&#9632; Stop' : '&#9673;'} ${p.destination}
+        </button>
+      `).join('')}
+    </div>
+
+    <!-- API reference -->
+    <div class="cam-api-info">
+      <span>Epiphan Pearl REST API v2.0 &middot; ${device.model}</span>
+      <span>Status: <code>/system/status</code> &middot; Storage: <code>/system/storage</code></span>
+      <span>Encoders: <code>/channels</code> &middot; Recorders: <code>/recorders</code> &middot; Publishers: <code>/channels/{id}/publishers</code></span>
+      <span>Inputs: <code>/sources</code> &middot; Layouts: <code>/channels/{id}/layouts</code></span>
+    </div>
+  `;
+}
+
+function renderMacBody(device) {
+  const cpuClass = device.cpu > 80 ? 'error' : device.cpu > 60 ? 'warn' : 'ok';
+  const memClass = device.mem > 85 ? 'error' : device.mem > 70 ? 'warn' : 'ok';
+  const diskPct = device.disk ? Math.round((device.disk.freeGb / device.disk.totalGb) * 100) : 0;
+  const diskClass = diskPct < 10 ? 'error' : diskPct < 25 ? 'warn' : 'ok';
+
+  return `
+    <!-- SSH connection bar -->
+    <div class="cam-session-bar">
+      <div class="cam-session-bar-left">
+        <div class="cam-session-dot" style="background: ${device.status === 'online' ? 'var(--green)' : 'var(--red)'}"></div>
+        <span>SSH ${device.ssh ? device.ssh.user + '@' + device.ssh.host : '—'}</span>
+        <span style="color:var(--text-muted); font-size:11px;">&#128274; key auth</span>
+      </div>
+      <span style="color:var(--text-muted); font-size:11px;">up ${device.uptime || '—'}</span>
+    </div>
+
+    <!-- System metrics -->
+    <div class="metrics-grid">
+      <div class="metric-item">
+        <div class="metric-label">CPU</div>
+        <div class="metric-value ${cpuClass}">${device.power ? device.cpu + '%' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Memory</div>
+        <div class="metric-value ${memClass}">${device.power ? device.mem + '%' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Disk Free</div>
+        <div class="metric-value ${diskClass}">${device.disk ? diskPct + '%' : '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Disk</div>
+        <div class="metric-value ok" style="font-size:13px;">${device.disk ? device.disk.freeGb + ' / ' + device.disk.totalGb + ' GB' : '—'}</div>
+      </div>
+    </div>
+
+    <!-- Audio routing -->
+    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">Audio Routing</div>
+    <div class="mac-audio-row">
+      <div class="mac-audio-line"><span class="label">Output</span><span class="value">${device.audio ? device.audio.output : '—'}</span></div>
+      <div class="mac-audio-line"><span class="label">Input</span><span class="value">${device.audio ? device.audio.input : '—'}</span></div>
+      <div class="mac-audio-line"><span class="label">Volume</span><span class="value">${device.audio ? device.audio.volume + '%' : '—'}</span></div>
+    </div>
+
+    <!-- Watched apps -->
+    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">Watched Apps</div>
+    <div class="mac-apps-list">
+      ${(device.apps || []).map(a => `
+        <div class="mac-app-row">
+          <div class="mac-app-left">
+            <div class="mac-app-dot ${a.running ? 'up' : 'down'}"></div>
+            <span>${a.name}</span>
+            ${a.running ? `<span class="mac-app-pid">pid ${a.pid}</span>` : '<span class="mac-app-pid">not running</span>'}
+          </div>
+          <button class="mac-app-restart"
+                  onclick="cmd('/api/mac/${device.id}/app/${encodeURIComponent(a.name)}/${a.running ? 'restart' : 'launch'}')"
+                  title="POST /api/mac/${device.id}/app/${a.name}/${a.running ? 'restart' : 'launch'}">
+            ${a.running ? 'Restart' : 'Launch'}
+          </button>
+        </div>
+      `).join('')}
+    </div>
+
+    <!-- Controls -->
+    <div class="control-row">
+      <button class="ctrl-btn ctrl-btn-neutral" onclick="cmd('/api/mac/${device.id}/sleep')" title="POST /api/mac/${device.id}/sleep">&#9790; Sleep</button>
+      <button class="ctrl-btn ctrl-btn-red" onclick="if (confirm('Reboot Mac Studio?')) cmd('/api/mac/${device.id}/reboot')" title="POST /api/mac/${device.id}/reboot">&#8635; Reboot</button>
+    </div>
+
+    <!-- API reference -->
+    <div class="cam-api-info">
+      <span>Control via SSH &middot; ${device.model}</span>
+      <span>Metrics: <code>top</code> &middot; <code>vm_stat</code> &middot; <code>df -h</code></span>
+      <span>Audio: <code>SwitchAudioSource</code> &middot; <code>osascript volume</code></span>
+      <span>Apps: <code>pgrep -lf</code> &middot; <code>osascript "tell app ... to quit/launch"</code></span>
+      <span>USB peripherals: <code>system_profiler SPUSBDataType</code></span>
+    </div>
+  `;
+}
+
+function renderRodecasterBody(device) {
+  const isConnected = device.status === 'online';
+  const formatLevel = lvl => lvl == null ? '' : (lvl + ' dB');
+  const meterPct = lvl => {
+    if (lvl == null) return 0;
+    // -60 dB → 0%, 0 dB → 100%
+    return Math.max(0, Math.min(100, ((lvl + 60) / 60) * 100));
+  };
+
+  return `
+    <!-- USB connection bar -->
+    <div class="rcp-conn-bar">
+      <div class="cam-session-dot" style="background: ${isConnected ? 'var(--green)' : 'var(--red)'}"></div>
+      <span>${isConnected ? 'Detected on Mac USB' : 'Not detected — check USB cable'}</span>
+      <span style="color:var(--text-muted); margin-left:auto;">via ${device.detectedVia || '—'}</span>
+    </div>
+
+    <!-- Device metadata -->
+    <div class="metrics-grid">
+      <div class="metric-item">
+        <div class="metric-label">Firmware</div>
+        <div class="metric-value ok" style="font-size:14px;">${device.firmware || '—'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Serial</div>
+        <div class="metric-value ok" style="font-size:11px; font-family:'SF Mono',monospace;">${device.serial || '—'}</div>
+      </div>
+    </div>
+
+    <!-- Channel strips -->
+    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">Channel Strips</div>
+    <div class="rcp-strip-list">
+      ${(device.strips || []).map(s => `
+        <div class="rcp-strip ${s.muted ? 'muted' : ''}">
+          <span class="rcp-strip-name">${s.name}</span>
+          <div class="rcp-meter">
+            <div class="rcp-meter-fill" style="width:${meterPct(s.levelDb)}%"></div>
+          </div>
+          <span class="rcp-strip-icon">${s.muted ? '&#128263;' : formatLevel(s.levelDb)}</span>
+        </div>
+      `).join('')}
+    </div>
+
+    <!-- Limitation note -->
+    <div class="device-note">
+      <strong>Read-only.</strong> Rodecaster Pro II has no documented network API — it speaks USB MIDI/HID only.
+      Levels and connection state come from a small bridge daemon on the Mac Studio.
+      Mute/level control would require extending that daemon.
+    </div>
+  `;
+}
+
+function renderDawBody(device) {
+  const sidecar = !!device.sidecarConnected;
+  const rec = device.recording || { active: false, durationSec: 0 };
+  const strips = device.strips || [];
+  const activeStrips = strips.filter(s => !s.muted).length;
+  const durSec = Math.floor(rec.durationSec || 0);
+  const durStr = `${Math.floor(durSec/60)}:${String(durSec%60).padStart(2,'0')}`;
+
+  return `
+    <!-- Sidecar connection bar -->
+    <div class="rcp-conn-bar">
+      <div class="cam-session-dot" style="background: ${sidecar ? 'var(--green)' : 'var(--red)'}"></div>
+      <span>${sidecar ? `Sidecar connected${device.sidecarVersion ? ' · v' + device.sidecarVersion : ''}` : 'Sidecar not connected — start studio-daw on the Mac'}</span>
+      <span style="color:var(--text-muted); margin-left:auto;">${device.captureDevice || '—'} &middot; ${(device.sampleRate||0)/1000}kHz</span>
+    </div>
+
+    <!-- Summary metrics -->
+    <div class="metrics-grid" style="margin-top:10px;">
+      <div class="metric-item">
+        <div class="metric-label">Channels</div>
+        <div class="metric-value ok">${activeStrips} / ${strips.length} active</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Recording</div>
+        <div class="metric-value ${rec.active ? 'error' : ''}">${rec.active ? '&#11044; REC ' + durStr : 'Idle'}</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Monitor</div>
+        <div class="metric-value ${device.monitoring ? 'ok' : ''}">${device.monitoring ? 'On' : 'Off'}</div>
+      </div>
+    </div>
+
+    <!-- Open the real mixer -->
+    <div class="control-row" style="margin-top:10px;">
+      <a class="ctrl-btn ctrl-btn-green" href="/studio/daw/?device=${encodeURIComponent(device.id)}" target="_blank" rel="noopener" style="text-decoration:none;">
+        &#9835; Open Mixer &rarr;
+      </a>
+    </div>
+
+    <div class="device-note">
+      Full RØDECaster-style mixing board opens in a new tab. Faders, EQ, mute/solo, sound pad, record &amp; tracks all live there.
     </div>
   `;
 }
@@ -1468,44 +1847,79 @@ function parseHash() {
 }
 
 // ══════════════════════════════════════════════
-//  REFRESH TIMER
-// ══════════════════════════════════════════════
-
-let lastRefreshTime = Date.now();
-setInterval(() => {
-  lastRefreshTime = Date.now();
-  document.getElementById('lastRefresh').textContent = 'Updated just now';
-  // In production: fetch device statuses here and re-render
-  render();
-}, 30000);
-
-setInterval(() => {
-  const seconds = Math.floor((Date.now() - lastRefreshTime) / 1000);
-  if (seconds >= 5) {
-    document.getElementById('lastRefresh').textContent = `Updated ${seconds}s ago`;
-  }
-}, 5000);
-
-// ══════════════════════════════════════════════
 //  INIT
+//
+//  1. Fetch initial state via REST so the page paints
+//     even if Socket.IO can't reach the server (e.g.
+//     when WP iframes the dashboard but the WS proxy
+//     isn't wired up yet).
+//  2. Open the WebSocket and replace state on
+//     `state:initial`, patch on `device:update`.
+//  3. The refresh dot doubles as a connection indicator.
 // ══════════════════════════════════════════════
 
-(function init() {
-  // Default to home campus
+function pickInitialCampus() {
+  if (state.activeCampusId) return; // already set by hash
   const homeCampus = CONFIG.campuses.find(c => c.isHome);
-  state.activeCampusId = homeCampus ? homeCampus.id : CONFIG.campuses[0].id;
+  state.activeCampusId = homeCampus ? homeCampus.id : (CONFIG.campuses[0] && CONFIG.campuses[0].id) || null;
+}
 
-  // Parse URL hash if present
+async function bootstrap() {
+  // Initial REST snapshot
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/rooms`);
+    if (res.ok) {
+      CONFIG = await res.json();
+    } else {
+      console.warn('GET /api/rooms failed', res.status);
+    }
+  } catch (err) {
+    console.warn('GET /api/rooms error', err);
+  }
+
+  pickInitialCampus();
   parseHash();
+  render();
 
-  // Listen for hash changes
+  // Open the websocket. typeof check so we don't crash if
+  // socket.io.js failed to load (e.g. cross-origin without proxy).
+  if (typeof io === 'function') {
+    const socket = io(BACKEND_URL || undefined, { transports: ['websocket', 'polling'] });
+
+    socket.on('connect', () => setConnState(true));
+    socket.on('disconnect', () => setConnState(false));
+    socket.on('connect_error', () => setConnState(false));
+
+    socket.on('state:initial', (snapshot) => {
+      CONFIG = snapshot;
+      pickInitialCampus();
+      render();
+    });
+
+    socket.on('device:update', ({ campusId, roomId, device }) => {
+      if (patchDeviceInConfig(campusId, roomId, device)) {
+        // Re-render only if user is currently looking at the affected room or dashboard.
+        if (state.currentView === 'dashboard' || state.currentRoomId === roomId) {
+          render();
+        }
+      }
+    });
+
+    socket.on('device:error', ({ deviceId, error }) => {
+      console.warn('device error', deviceId, error);
+    });
+  } else {
+    console.warn('socket.io client not loaded; running in REST-only mode');
+    setConnState(false);
+  }
+
   window.addEventListener('hashchange', () => {
     parseHash();
     render();
   });
+}
 
-  render();
-})();
+bootstrap();
 </script>
 
 </body>

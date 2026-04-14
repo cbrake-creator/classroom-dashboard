@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RØDE Console — Local DAW</title>
+  <link rel="stylesheet" href="static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div id="app">
+  <!-- ═══ HEADER ═══ -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="header-logo">RC</div>
+      <div>
+        <div class="header-title">RØDE Console</div>
+        <div class="header-subtitle">Local DAW v1.0</div>
+      </div>
+    </div>
+
+    <div class="header-tabs">
+      <button class="tab-btn active" data-view="mixer">Mixer</button>
+      <button class="tab-btn" data-view="tracks">Tracks</button>
+      <button class="tab-btn" data-view="record">Record</button>
+    </div>
+
+    <div class="header-status">
+      <div class="status-item">
+        <div class="status-dot" id="deviceDot"></div>
+        <span id="deviceStatus">Detecting…</span>
+      </div>
+      <div class="status-item">
+        <span>48kHz / 16-bit</span>
+      </div>
+      <div class="status-item">
+        <span id="recStatusLabel"></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══ MAIN ═══ -->
+  <div class="main-content">
+
+    <!-- ── MIXER VIEW ── -->
+    <div class="view-panel active" id="view-mixer">
+      <div class="preset-bar">
+        <div class="preset-bar-label">PRESET</div>
+        <select class="preset-select" id="presetSelect"></select>
+        <input type="text" class="preset-name-input" id="presetName" placeholder="Name…" maxlength="64">
+        <button class="preset-btn" id="presetLoad" title="Load selected preset">Load</button>
+        <button class="preset-btn preset-btn-primary" id="presetSave" title="Save current mix to selected slot">Save</button>
+        <button class="preset-btn preset-btn-danger" id="presetClear" title="Clear this slot">Clear</button>
+        <div class="preset-divider"></div>
+        <div class="preset-default-label" id="presetDefaultLabel">DEFAULT: <span id="presetDefaultName">(unset)</span></div>
+        <button class="preset-btn" id="presetDefaultLoad" title="Load default preset">Load Default</button>
+        <button class="preset-btn preset-btn-default" id="presetDefaultSave" title="Save current mix as default (requires confirmation if one exists)">Set Default</button>
+        <button class="preset-btn preset-btn-danger" id="presetDefaultClear" title="Clear default (double confirmation required)">✕</button>
+        <div class="preset-status" id="presetStatus"></div>
+      </div>
+      <div class="mixer-view">
+        <div class="mixer-scroll" id="mixerScroll">
+          <!-- Channel strips injected by JS -->
+        </div>
+
+        <!-- Master Strip -->
+        <div class="master-strip">
+          <div class="strip-label">MASTER</div>
+          <div class="meter-container" style="height:160px">
+            <div class="master-meters">
+              <div class="meter-bar"><div class="meter-fill" id="masterMeterL" style="height:0%"></div><div class="meter-peak" id="masterPeakL" style="bottom:0%"></div></div>
+              <div class="meter-bar"><div class="meter-fill" id="masterMeterR" style="height:0%"></div><div class="meter-peak" id="masterPeakR" style="bottom:0%"></div></div>
+            </div>
+          </div>
+          <div class="fader-section">
+            <div class="fader-track-container" id="masterFader" data-value="1.0" data-max="1.5">
+              <div class="fader-track"></div>
+              <div class="fader-fill-bar" style="height:66%"></div>
+              <div class="fader-thumb" style="bottom:calc(66% - 6px)"></div>
+            </div>
+            <div class="fader-value" id="masterFaderVal">0.0 dB</div>
+          </div>
+          <div class="limiter-toggle">
+            <label>Limiter</label>
+            <div class="toggle-switch active" id="limiterToggle"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- FX Drawer -->
+      <div class="fx-drawer" id="fxDrawer">
+        <div class="fx-drawer-header">
+          <div class="fx-drawer-title" id="fxDrawerTitle">EQ & Dynamics — Track</div>
+          <button class="fx-close-btn" id="fxCloseBtn">&times;</button>
+        </div>
+        <div class="fx-content" id="fxContent">
+          <!-- Populated by JS on track select -->
+        </div>
+      </div>
+    </div>
+
+    <!-- ── TRACKS VIEW ── -->
+    <div class="view-panel" id="view-tracks">
+      <div class="tracks-view">
+        <div class="tracks-toolbar">
+          <button class="strip-btn" id="btnImport">Import WAV</button>
+          <button class="strip-btn" id="btnExportAll">Export All</button>
+          <button class="strip-btn" id="btnLoadSession">Last Session</button>
+        </div>
+        <div class="timeline-ruler" id="timelineRuler">
+          <div class="playhead" id="playhead"></div>
+          <div class="ruler-marks" id="rulerMarks"></div>
+        </div>
+        <div class="tracks-scroll" id="tracksScroll">
+          <!-- Drop zone when empty -->
+          <div class="drop-zone" id="trackDropZone">
+            <div class="drop-zone-text">Drop WAV files here or record a session</div>
+            <div class="drop-zone-sub">Stereo 48kHz WAV files supported</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── RECORD VIEW ── -->
+    <div class="view-panel" id="view-record">
+      <div class="record-view">
+        <div class="rec-device-info">
+          <div class="rec-device-name" id="recDeviceName">Detecting device…</div>
+          <div class="rec-device-spec" id="recDeviceSpec">—</div>
+        </div>
+        <div class="rec-timer" id="recTimer">00:00:00</div>
+        <button class="rec-big-button" id="recButton">
+          <div class="rec-inner-circle"></div>
+        </button>
+        <div class="rec-input-meters" id="recInputMeters">
+          <!-- 7 meter pairs injected by JS -->
+        </div>
+        <div style="font-family:var(--font-mono);font-size:12px;color:var(--text-tertiary);letter-spacing:0.5px;">
+          Press <span class="kbd">R</span> to start/stop recording
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ═══ TRANSPORT BAR ═══ -->
+  <div class="transport-bar">
+    <div class="transport-time">
+      <div class="transport-timecode" id="transportTime">00:00:00.000</div>
+      <div class="transport-time-label">Time Code</div>
+    </div>
+
+    <div class="transport-controls">
+      <button class="transport-btn" id="btnStop" title="Stop (Home)">
+        <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+      </button>
+      <button class="transport-btn" id="btnPlay" title="Play/Pause (Space)">
+        <svg viewBox="0 0 24 24"><polygon points="8,5 20,12 8,19"/></svg>
+      </button>
+      <button class="transport-btn" id="btnRecord" title="Record (R)">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg>
+      </button>
+    </div>
+
+    <div class="transport-info">
+      <div class="transport-info-item">
+        <div class="transport-info-value" id="infoTracks">0</div>
+        <div class="transport-info-label">Tracks</div>
+      </div>
+      <div class="transport-info-item">
+        <div class="transport-info-value" id="infoSession">—</div>
+        <div class="transport-info-label">Session</div>
+      </div>
+      <div class="transport-info-item">
+        <div class="transport-info-value" id="infoFormat">—</div>
+        <div class="transport-info-label">Format</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept=".wav" multiple style="display:none">
+<script src="static/app.js"></script>
+</body>
+</html>
