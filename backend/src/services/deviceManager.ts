@@ -161,7 +161,10 @@ async function pollDeviceRef(campusId: string, roomId: string, device: Device): 
     const msg = (err as Error).message ?? 'unknown';
     const count = (failureCounts.get(key) ?? 0) + 1;
     failureCounts.set(key, count);
-    log.debug({ key, count, err: msg }, 'device poll failed');
+    // First few failures log at info so troubleshooting on a fresh machine
+    // (no LOG_LEVEL=debug) still shows why a device went offline.
+    const level = count <= FAILURE_THRESHOLD ? 'info' : 'debug';
+    log[level]({ key, count, err: msg }, 'device poll failed');
 
     if (config.deviceMode === 'live') {
       if (count >= FAILURE_THRESHOLD && device.status !== 'offline') {
