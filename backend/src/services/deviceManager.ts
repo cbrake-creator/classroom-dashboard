@@ -37,16 +37,16 @@ let pollHandle: NodeJS.Timeout | null = null;
 
 // ─── Per-device refresh ────────────────────────────────────
 async function refreshPearl(device: PearlDevice): Promise<Partial<PearlDevice>> {
+  const host = device.ip;
   const [sys, storage, channels, recorders, sources] = await Promise.all([
-    pearl.getSystemStatus(),
-    pearl.getStorage(),
-    pearl.getChannels(),
-    pearl.getRecorders(),
-    pearl.getSources(),
+    pearl.getSystemStatus(host),
+    pearl.getStorage(host),
+    pearl.getChannels(host),
+    pearl.getRecorders(host),
+    pearl.getSources(host),
   ]);
-  // Publishers per channel
   const publishers = (
-    await Promise.all(channels.map((ch) => pearl.getPublishers(ch.id).catch(() => [])))
+    await Promise.all(channels.map((ch) => pearl.getPublishers(host, ch.id).catch(() => [])))
   ).flat();
   return {
     status: 'online',

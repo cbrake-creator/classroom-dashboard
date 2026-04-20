@@ -86,17 +86,18 @@ router.post('/:roomId/start-session', async (req, res) => {
 
   if (refs.pearl) {
     const pearlId = refs.pearl.id;
+    const pearlHost = refs.pearl.ip;
     for (const rec of refs.pearl.recorders) {
       steps.push(
         await runStep(`pearl.recorder.start.${rec.id}`, () =>
-          applyCommand(pearlId, () => pearl.startRecorder(rec.id)),
+          applyCommand(pearlId, () => pearl.startRecorder(pearlHost, rec.id)),
         ),
       );
     }
     for (const pub of refs.pearl.publishers) {
       steps.push(
         await runStep(`pearl.publisher.start.${pub.id}`, () =>
-          applyCommand(pearlId, () => pearl.startPublisher(pub.channelId, pub.id)),
+          applyCommand(pearlId, () => pearl.startPublisher(pearlHost, pub.channelId, pub.id)),
         ),
       );
     }
@@ -113,17 +114,18 @@ router.post('/:roomId/stop-session', async (req, res) => {
 
   if (refs.pearl) {
     const pearlId = refs.pearl.id;
+    const pearlHost = refs.pearl.ip;
     for (const pub of refs.pearl.publishers) {
       steps.push(
         await runStep(`pearl.publisher.stop.${pub.id}`, () =>
-          applyCommand(pearlId, () => pearl.stopPublisher(pub.channelId, pub.id)),
+          applyCommand(pearlId, () => pearl.stopPublisher(pearlHost, pub.channelId, pub.id)),
         ),
       );
     }
     for (const rec of refs.pearl.recorders) {
       steps.push(
         await runStep(`pearl.recorder.stop.${rec.id}`, () =>
-          applyCommand(pearlId, () => pearl.stopRecorder(rec.id)),
+          applyCommand(pearlId, () => pearl.stopRecorder(pearlHost, rec.id)),
         ),
       );
     }

@@ -96,6 +96,7 @@ function makeClassroom(
   cameraIp?: string,
   override?: (r: Room) => void,
   type: Room['type'] = 'classroom',
+  pearlIp?: string,
 ): Room {
   const room: Room = {
     id,
@@ -108,8 +109,36 @@ function makeClassroom(
     cam.ip = cameraIp;
     cam.apiBase = `http://${cameraIp}/-wvhttp-01-`;
   }
+  if (pearlIp) {
+    room.devices.push(makePearlStub(pearlIp, `${name} Pearl`));
+  }
   if (override) override(room);
   return room;
+}
+
+// Minimal Pearl device stub — deviceManager will overwrite every field via
+// live polling on boot. Name is cosmetic; the IP is what matters.
+function makePearlStub(ip: string, name: string): PearlDevice {
+  return {
+    id: 'pearl-1',
+    type: 'pearl',
+    brand: 'Epiphan',
+    model: 'Pearl 2',
+    ip,
+    apiBase: `http://${ip}/api/v2.0`,
+    auth: { enabled: true, username: config.pearl.username, password: 'env:PEARL_PASSWORD' },
+    status: 'online',
+    power: true,
+    firmware: '—',
+    cpu: 0,
+    temp: 0,
+    uptime: '—',
+    storage: { freeGb: 0, totalGb: 0 },
+    channels: [],
+    recorders: [],
+    publishers: [],
+    sources: [],
+  };
 }
 
 function makeHybridClassroomDevices(subnet: number, tvCount: number) {
@@ -217,35 +246,9 @@ function makeFacultyPodcastStudio(): Room {
     powerTransition: null,
   });
 
-  const pearl: PearlDevice = {
-    id: 'pearl-1',
-    type: 'pearl',
-    brand: 'Epiphan',
-    model: 'Pearl 2',
-    ip: config.pearl.host,
-    apiBase: `http://${config.pearl.host}/api/v2.0`,
-    auth: { enabled: true, username: config.pearl.username, password: 'env:PEARL_PASSWORD' },
-    status: 'online',
-    power: true,
-    firmware: '4.27.0',
-    cpu: 28,
-    temp: 52,
-    uptime: '12d 4h',
-    storage: { freeGb: 1840, totalGb: 2000 },
-    channels: [
-      { id: 1, name: 'Program', encoderState: 'running', fps: 30, bitrateKbps: 8000, currentLayout: 'Multi-Cam Wide' },
-      { id: 2, name: 'ISO Cam 1', encoderState: 'running', fps: 30, bitrateKbps: 6000, currentLayout: 'Cam 1 Full' },
-    ],
-    recorders: [{ id: 1, name: 'Master Recorder', state: 'stopped', durationSec: 0 }],
-    publishers: [{ id: 1, channelId: 1, type: 'RTMP', destination: 'DTS YouTube', state: 'stopped' }],
-    sources: [
-      { id: 'hdmi-a', name: 'HDMI-A', connected: true, label: 'Cam 1' },
-      { id: 'hdmi-b', name: 'HDMI-B', connected: true, label: 'Cam 2' },
-      { id: 'sdi-a', name: 'SDI-A', connected: true, label: 'Cam 3' },
-      { id: 'sdi-b', name: 'SDI-B', connected: false, label: '—' },
-      { id: 'audio-1', name: 'Analog', connected: true, label: 'Rodecaster Main Mix' },
-    ],
-  };
+  // Faculty Podcast Studio's Pearl is not currently on the network (user
+  // confirmed Tech Talk Pearl at .246 is for student Tech Talks, not Faculty
+  // Podcast). Omitting Pearl from this room until the correct IP is known.
 
   const mac: MacDevice = {
     id: 'mac-1',
@@ -345,7 +348,20 @@ function makeFacultyPodcastStudio(): Room {
     id: 'faculty-podcast',
     name: 'Faculty Podcast Studio',
     type: 'studio',
-    devices: [pearl, cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, rodecaster, daw],
+    devices: [cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, rodecaster, daw],
+  };
+}
+
+// ─── Tech Talks Studio ─────────────────────────────────────
+// Student tech talks — separate from Faculty Podcast. Has its own Pearl 2
+// at 10.56.1.246 (mDNS name: "Tech Talk Pearl"). Cameras/Mac/etc unknown,
+// so just the encoder for now.
+function makeTechTalksStudio(): Room {
+  return {
+    id: 'tech-talks',
+    name: 'Tech Talks Studio',
+    type: 'studio',
+    devices: [makePearlStub('10.56.1.246', 'Tech Talk Pearl')],
   };
 }
 
@@ -388,9 +404,10 @@ export function buildInitialState(): DashboardState {
         tv.power = false;
       }),
       makeClassroom('todd-218', 'Todd 218', 12, 4, '10.56.24.230'),
-      makeClassroom('todd-313', 'Todd 313', 13, 4, '10.56.24.212'),
-      makeClassroom('todd-315', 'Todd 315', 14, 4, '10.56.24.235'),
-      makeClassroom('todd-317', 'Todd 317', 15, 4, '10.56.24.236'),
+      // Preaching labs — each has a Pearl 2 encoder.
+      makeClassroom('todd-313', 'Todd 313', 13, 4, '10.56.24.212', undefined, 'classroom', '10.56.1.204'),
+      makeClassroom('todd-315', 'Todd 315', 14, 4, '10.56.24.235', undefined, 'classroom', '10.56.1.186'),
+      makeClassroom('todd-317', 'Todd 317', 15, 4, '10.56.24.236', undefined, 'classroom', '10.56.1.135'),
       makeClassroom('todd-320', 'Todd 320', 16, 4, '10.56.1.224'),
       makeHybridClassroom('wsc-333', 'WSC 333', 36, 4),
       makeHybridClassroom('wsc-334', 'WSC 334', 37, 4),
@@ -436,6 +453,7 @@ export function buildInitialState(): DashboardState {
       makeConference('hendricks-207', 'Hendricks 207 (Seay Library)', 31),
       // Studios
       makeFacultyPodcastStudio(),
+      makeTechTalksStudio(),
     ],
   };
 

@@ -5,9 +5,9 @@
 //  Auth: HTTP Basic
 //  Base: http://<host>/api/v2.0
 //
-//  All methods return shapes that match the PearlDevice type
-//  (or partials thereof). Errors throw — the caller (deviceManager)
-//  decides how to handle them (mark offline, fall back, etc.).
+//  Every call takes `host` as the first argument because DTS has
+//  multiple Pearls on the network (Todd 313/315/317 classrooms
+//  plus Tech Talks). Callers pass the per-device IP.
 // ──────────────────────────────────────────────────────────
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../config.js';
@@ -16,9 +16,9 @@ import type { PearlChannel, PearlPublisher, PearlRecorder, PearlSource } from '.
 
 const log = logger.child({ device: 'pearl' });
 
-function client(): AxiosInstance {
+function client(host: string): AxiosInstance {
   return axios.create({
-    baseURL: `http://${config.pearl.host}/api/v2.0`,
+    baseURL: `http://${host}/api/v2.0`,
     timeout: config.deviceHttpTimeoutMs,
     auth: { username: config.pearl.username, password: config.pearl.password },
     headers: { Accept: 'application/json' },
@@ -26,33 +26,36 @@ function client(): AxiosInstance {
 }
 
 // ─── Reads ─────────────────────────────────────────────────
-export async function getSystemStatus(): Promise<{
+export async function getSystemStatus(host: string): Promise<{
   cpu: number;
   temp: number;
   uptime: string;
   firmware: string;
 }> {
-  const c = client();
-  // Pearl exposes /system/status, /system/info — we coalesce.
+  const c = client(host);
   const [statusRes, infoRes] = await Promise.all([
     c.get('/system/status'),
-    c.get('/system/info'),
+    c.get('/system/info').catch(() => ({ data: {} })),
   ]);
   const s = statusRes.data?.result ?? statusRes.data ?? {};
   const i = infoRes.data?.result ?? infoRes.data ?? {};
+  // Pearl 2 firmware 4.x returns `cpuload` (lowercase, no camel) and `cputemp`.
+  const uptimeSec = Number(s.uptime ?? s.systemUptime ?? 0);
+  const uptimeStr = uptimeSec
+    ? `${Math.floor(uptimeSec / 86400)}d ${Math.floor((uptimeSec % 86400) / 3600)}h`
+    : String(s.uptime ?? '—');
   return {
-    cpu: Number(s.cpuLoad ?? s.cpu ?? 0),
-    temp: Number(s.cpuTemp ?? s.temperature ?? 0),
-    uptime: String(s.uptime ?? s.systemUptime ?? '—'),
+    cpu: Number(s.cpuload ?? s.cpuLoad ?? s.cpu ?? 0),
+    temp: Number(s.cputemp ?? s.cpuTemp ?? s.temperature ?? 0),
+    uptime: uptimeStr,
     firmware: String(i.firmwareVersion ?? i.version ?? '—'),
   };
 }
 
-export async function getStorage(): Promise<{ freeGb: number; totalGb: number }> {
-  const c = client();
-  const res = await c.get('/system/storage');
-  const s = res.data?.result ?? res.data ?? {};
-  // Pearl returns bytes; convert.
+export async function getStorage(host: string): Promise<{ freeGb: number; totalGb: number }> {
+  const c = client(host);
+  const res = await c.get('/system/storage').catch(() => ({ data: {} }));
+  const s = (res as { data?: { result?: Record<string, unknown> } }).data?.result ?? {};
   const total = Number(s.totalSpace ?? s.total ?? 0);
   const free = Number(s.freeSpace ?? s.free ?? 0);
   return {
@@ -61,8 +64,8 @@ export async function getStorage(): Promise<{ freeGb: number; totalGb: number }>
   };
 }
 
-export async function getChannels(): Promise<PearlChannel[]> {
-  const c = client();
+export async function getChannels(host: string): Promise<PearlChannel[]> {
+  const c = client(host);
   const res = await c.get('/channels');
   const list = (res.data?.result ?? res.data ?? []) as Array<Record<string, unknown>>;
   return Promise.all(
@@ -84,8 +87,8 @@ export async function getChannels(): Promise<PearlChannel[]> {
   );
 }
 
-export async function getRecorders(): Promise<PearlRecorder[]> {
-  const c = client();
+export async function getRecorders(host: string): Promise<PearlRecorder[]> {
+  const c = client(host);
   const res = await c.get('/recorders');
   const list = (res.data?.result ?? res.data ?? []) as Array<Record<string, unknown>>;
   return Promise.all(
@@ -105,8 +108,8 @@ export async function getRecorders(): Promise<PearlRecorder[]> {
   );
 }
 
-export async function getPublishers(channelId: number): Promise<PearlPublisher[]> {
-  const c = client();
+export async function getPublishers(host: string, channelId: number): Promise<PearlPublisher[]> {
+  const c = client(host);
   const res = await c.get(`/channels/${channelId}/publishers`);
   const list = (res.data?.result ?? res.data ?? []) as Array<Record<string, unknown>>;
   return list.map((p) => {
@@ -121,8 +124,8 @@ export async function getPublishers(channelId: number): Promise<PearlPublisher[]
   });
 }
 
-export async function getSources(): Promise<PearlSource[]> {
-  const c = client();
+export async function getSources(host: string): Promise<PearlSource[]> {
+  const c = client(host);
   const res = await c.get('/sources');
   const list = (res.data?.result ?? res.data ?? []) as Array<Record<string, unknown>>;
   return list.map((s) => ({
@@ -134,27 +137,27 @@ export async function getSources(): Promise<PearlSource[]> {
 }
 
 // ─── Writes / commands ─────────────────────────────────────
-export async function startRecorder(id: number): Promise<void> {
-  await client().post(`/recorders/${id}/control/start`);
-  log.info({ id }, 'pearl recorder start');
+export async function startRecorder(host: string, id: number): Promise<void> {
+  await client(host).post(`/recorders/${id}/control/start`);
+  log.info({ host, id }, 'pearl recorder start');
 }
 
-export async function stopRecorder(id: number): Promise<void> {
-  await client().post(`/recorders/${id}/control/stop`);
-  log.info({ id }, 'pearl recorder stop');
+export async function stopRecorder(host: string, id: number): Promise<void> {
+  await client(host).post(`/recorders/${id}/control/stop`);
+  log.info({ host, id }, 'pearl recorder stop');
 }
 
-export async function startPublisher(channelId: number, publisherId: number): Promise<void> {
-  await client().post(`/channels/${channelId}/publishers/${publisherId}/control/start`);
-  log.info({ channelId, publisherId }, 'pearl publisher start');
+export async function startPublisher(host: string, channelId: number, publisherId: number): Promise<void> {
+  await client(host).post(`/channels/${channelId}/publishers/${publisherId}/control/start`);
+  log.info({ host, channelId, publisherId }, 'pearl publisher start');
 }
 
-export async function stopPublisher(channelId: number, publisherId: number): Promise<void> {
-  await client().post(`/channels/${channelId}/publishers/${publisherId}/control/stop`);
-  log.info({ channelId, publisherId }, 'pearl publisher stop');
+export async function stopPublisher(host: string, channelId: number, publisherId: number): Promise<void> {
+  await client(host).post(`/channels/${channelId}/publishers/${publisherId}/control/stop`);
+  log.info({ host, channelId, publisherId }, 'pearl publisher stop');
 }
 
-export async function setChannelLayout(channelId: number, layoutId: number): Promise<void> {
-  await client().post(`/channels/${channelId}/layouts/${layoutId}/activate`);
-  log.info({ channelId, layoutId }, 'pearl layout switch');
+export async function setChannelLayout(host: string, channelId: number, layoutId: number): Promise<void> {
+  await client(host).post(`/channels/${channelId}/layouts/${layoutId}/activate`);
+  log.info({ host, channelId, layoutId }, 'pearl layout switch');
 }
