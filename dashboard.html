@@ -802,6 +802,62 @@
   .pearl-onetouch.recording .pearl-rec-time { color: var(--red); }
   .pearl-rec-sub { font-size: 11px; color: var(--text-muted); }
 
+  .pearl-recordings {
+    margin-top: 12px; padding: 10px 12px;
+    background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .pearl-recordings-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+  }
+  .pearl-recordings-title { font-size: 12px; font-weight: 600; color: var(--text); }
+  .pearl-rec-refresh {
+    background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+    padding: 3px 10px; font-size: 11px; border-radius: 4px; cursor: pointer;
+  }
+  .pearl-rec-refresh:hover { color: var(--text); border-color: var(--blue); }
+  .pearl-recordings-empty { color: var(--text-muted); font-size: 12px; padding: 6px 0; }
+  .pearl-recordings-list { display: flex; flex-direction: column; gap: 6px; }
+  .pearl-session {
+    padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  }
+  .pearl-session-head {
+    display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px;
+  }
+  .pearl-session-when { font-size: 12px; font-weight: 500; color: var(--text); }
+  .pearl-session-meta { font-size: 11px; color: var(--text-muted); font-family: 'SF Mono', monospace; }
+  .pearl-session-files { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pearl-file-btn {
+    background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+    padding: 4px 10px; font-size: 11px; border-radius: 4px; cursor: pointer;
+  }
+  .pearl-file-btn:hover { background: var(--bg-card-hover); border-color: var(--blue); }
+
+  #pearl-player-modal {
+    position: fixed; inset: 0; z-index: 9999;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .pearl-player-backdrop {
+    position: absolute; inset: 0; background: rgba(0,0,0,.75); cursor: pointer;
+  }
+  .pearl-player-card {
+    position: relative; z-index: 1; max-width: 90vw; width: 900px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+  .pearl-player-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; background: var(--bg-primary); border-bottom: 1px solid var(--border);
+    font-size: 13px; color: var(--text);
+  }
+  .pearl-player-close {
+    background: transparent; border: none; color: var(--text-muted);
+    font-size: 24px; line-height: 1; cursor: pointer;
+  }
+  .pearl-player-foot {
+    padding: 10px 14px; border-top: 1px solid var(--border);
+    display: flex; justify-content: flex-end;
+  }
+
   .pearl-state-row {
     display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;
   }
@@ -1683,11 +1739,12 @@ function renderPearlBody(device) {
   const tempClass = device.temp > 75 ? 'error' : device.temp > 65 ? 'warn' : 'ok';
   const storageClass = storagePctFree < 10 ? 'error' : storagePctFree < 25 ? 'warn' : 'ok';
 
-  // Duration of the first recording recorder — all recorders start
-  // together via one-touch, so any one is representative.
   const activeRec = (device.recorders || []).find(r => r.state === 'recording');
-  const durSec = activeRec ? Math.floor(activeRec.durationSec || 0) : 0;
-  const durStr = `${Math.floor(durSec/3600).toString().padStart(2,'0')}:${Math.floor((durSec%3600)/60).toString().padStart(2,'0')}:${(durSec%60).toString().padStart(2,'0')}`;
+  const pearlDurSec = activeRec ? Math.floor(activeRec.durationSec || 0) : 0;
+
+  // Stash the current "known duration" for the client-side per-second ticker.
+  // The ticker reads this on every tick and draws: known + (now - recvTime)/1000.
+  pearlRecState.set(device.id, { recording, baseSec: pearlDurSec, baseAt: Date.now() });
 
   return `
     <!-- One-touch record — mirrors the hardware REC button on the Pearl -->
@@ -1700,10 +1757,13 @@ function renderPearlBody(device) {
         <span class="pearl-rec-label">${recording ? 'STOP' : 'REC'}</span>
       </button>
       <div class="pearl-rec-meta">
-        <div class="pearl-rec-time">${recording ? durStr : '00:00:00'}</div>
+        <div class="pearl-rec-time" data-pearlid="${device.id}">${formatHMS(pearlDurSec)}</div>
         <div class="pearl-rec-sub">${(device.recorders || []).length} recorder${(device.recorders||[]).length === 1 ? '' : 's'} · ${recording ? 'Recording all' : 'Idle'}</div>
       </div>
     </div>
+
+    <!-- Recent recordings (loaded async; click to play in-browser) -->
+    <div id="pearl-recordings-${device.id}" class="pearl-recordings"></div>
 
     <!-- Encoder state pills -->
     <div class="pearl-state-row">
@@ -2036,6 +2096,133 @@ function goBack() {
 //  RENDER ORCHESTRATOR
 // ══════════════════════════════════════════════
 
+// ── Pearl recording live ticker ───────────────────────────
+// Pearl's duration only updates every 5s via the poll cycle. We tick locally
+// every second by remembering {baseSec, baseAt} at the last poll and adding
+// elapsed time since — reset whenever a fresh device:update arrives.
+const pearlRecState = new Map(); // deviceId -> { recording, baseSec, baseAt }
+
+function formatHMS(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+setInterval(() => {
+  pearlRecState.forEach((st, id) => {
+    const el = document.querySelector(`.pearl-rec-time[data-pearlid="${id}"]`);
+    if (!el) return;
+    if (!st.recording) {
+      el.textContent = formatHMS(0);
+      return;
+    }
+    const elapsed = (Date.now() - st.baseAt) / 1000;
+    el.textContent = formatHMS(st.baseSec + elapsed);
+  });
+}, 1000);
+
+// ── Pearl recordings list ─────────────────────────────────
+const pearlRecList = new Map(); // deviceId -> { fetchedAt, files }
+const RECORDINGS_TTL_MS = 30_000;
+
+async function loadPearlRecordings(deviceId, force) {
+  const cached = pearlRecList.get(deviceId);
+  if (!force && cached && Date.now() - cached.fetchedAt < RECORDINGS_TTL_MS) {
+    return renderPearlRecordings(deviceId);
+  }
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/pearl/${deviceId}/recordings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    pearlRecList.set(deviceId, { fetchedAt: Date.now(), files: data.files || [] });
+    renderPearlRecordings(deviceId);
+  } catch (err) {
+    console.warn('failed to load pearl recordings', err);
+  }
+}
+
+function renderPearlRecordings(deviceId) {
+  const host = document.getElementById(`pearl-recordings-${deviceId}`);
+  if (!host) return;
+  const cached = pearlRecList.get(deviceId);
+  const files = cached?.files || [];
+  if (files.length === 0) {
+    host.innerHTML = `
+      <div class="pearl-recordings-header">
+        <span class="pearl-recordings-title">&#9655; Recent Recordings</span>
+        <button class="pearl-rec-refresh" onclick="loadPearlRecordings('${deviceId}', true)">&#8635; Refresh</button>
+      </div>
+      <div class="pearl-recordings-empty">No recordings yet. Hit REC to start.</div>`;
+    return;
+  }
+  // Group by timestamp — a single recording session produces one file per
+  // recorder with identical created-time (within a second). Collapse them
+  // so the UI shows one row per session with all 3 camera angles under it.
+  const groups = new Map();
+  for (const f of files) {
+    const bucket = String(f.created).slice(0, 16); // minute granularity
+    if (!groups.has(bucket)) groups.set(bucket, []);
+    groups.get(bucket).push(f);
+  }
+  const sessions = [...groups.entries()].map(([when, items]) => ({
+    when,
+    items: items.sort((a, b) => a.recorderId - b.recorderId),
+    totalMB: items.reduce((s, f) => s + f.sizeBytes, 0) / 1e6,
+    duration: Math.max(...items.map((f) => f.duration)),
+  }));
+  host.innerHTML = `
+    <div class="pearl-recordings-header">
+      <span class="pearl-recordings-title">&#9655; Recent Recordings (${files.length} file${files.length === 1 ? '' : 's'} · ${sessions.length} session${sessions.length === 1 ? '' : 's'})</span>
+      <button class="pearl-rec-refresh" onclick="loadPearlRecordings('${deviceId}', true)">&#8635; Refresh</button>
+    </div>
+    <div class="pearl-recordings-list">
+      ${sessions.slice(0, 6).map((sess) => `
+        <div class="pearl-session">
+          <div class="pearl-session-head">
+            <span class="pearl-session-when">${new Date(sess.when).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+            <span class="pearl-session-meta">${formatHMS(sess.duration)} · ${sess.totalMB.toFixed(1)} MB</span>
+          </div>
+          <div class="pearl-session-files">
+            ${sess.items.map((f) => `
+              <button class="pearl-file-btn" onclick="playPearlFile('${deviceId}', ${f.recorderId}, '${encodeURIComponent(f.id)}', ${JSON.stringify(f.name).replace(/"/g,'&quot;')})">
+                &#9658; ${recorderNameShort(f.name)}
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
+function recorderNameShort(name) {
+  // "Center Camera_Apr20_16-08-45" → "Center"
+  const base = String(name).split('_')[0];
+  return base.replace(/\s*Camera\s*$/i, '').trim() || base;
+}
+
+function playPearlFile(deviceId, recorderId, fileId, displayName) {
+  const url = `${BACKEND_URL}/api/pearl/${deviceId}/recordings/${recorderId}/${fileId}/stream`;
+  let modal = document.getElementById('pearl-player-modal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'pearl-player-modal';
+  modal.innerHTML = `
+    <div class="pearl-player-backdrop" onclick="this.parentElement.remove()"></div>
+    <div class="pearl-player-card">
+      <div class="pearl-player-head">
+        <span>${displayName}</span>
+        <button class="pearl-player-close" onclick="this.closest('#pearl-player-modal').remove()">&times;</button>
+      </div>
+      <video controls autoplay src="${url}" style="width:100%;max-height:70vh;background:#000;"></video>
+      <div class="pearl-player-foot">
+        <a class="ctrl-btn ctrl-btn-blue" href="${url}" download style="text-decoration:none;">&#11015; Download</a>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
 // Persistent <img> cache for MJPEG streams. The render() pipeline rewrites
 // innerHTML, which would otherwise tear down the MJPEG <img> every time a
 // device:update arrives — causing visible flicker every few seconds.
@@ -2109,6 +2296,11 @@ function render() {
       renderDashboard();
     }
     attachPersistentCamImgs();
+    // Populate Pearl recording lists for any Pearl cards on screen.
+    document.querySelectorAll('[id^="pearl-recordings-"]').forEach((el) => {
+      const id = el.id.replace('pearl-recordings-', '');
+      loadPearlRecordings(id, false);
+    });
   }, 80);
 }
 

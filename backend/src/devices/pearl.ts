@@ -179,3 +179,45 @@ export async function setChannelLayout(host: string, channelId: number, layoutId
   await client(host).post(`/channels/${channelId}/layouts/${layoutId}/activate`);
   log.info({ host, channelId, layoutId }, 'pearl layout switch');
 }
+
+// ─── Archive (recorded files) ──────────────────────────────
+export interface PearlArchiveFile {
+  id: string;           // Pearl's internal file id, URL-encoded into stream path
+  name: string;         // friendly display name
+  recorderId: number;
+  extension: string;
+  created: string;      // ISO-ish from Pearl
+  duration: number;     // seconds
+  sizeBytes: number;
+  recording: boolean;   // still being written
+}
+
+export async function listArchive(host: string, recorderIds: number[]): Promise<PearlArchiveFile[]> {
+  const c = client(host);
+  const all: PearlArchiveFile[] = [];
+  await Promise.all(
+    recorderIds.map(async (id) => {
+      try {
+        const res = await c.get(`/recorders/${id}/archive/files`);
+        const list = (res.data?.result ?? []) as Array<Record<string, unknown>>;
+        for (const f of list) {
+          all.push({
+            id: String(f.id),
+            name: String(f.name ?? f.id),
+            recorderId: id,
+            extension: String(f.extension ?? 'mp4'),
+            created: String(f.created ?? ''),
+            duration: Number(f.duration ?? 0),
+            sizeBytes: Number(f.size ?? 0),
+            recording: Boolean(f.recording ?? false),
+          });
+        }
+      } catch {
+        // skip recorder on failure
+      }
+    }),
+  );
+  // Newest first.
+  all.sort((a, b) => (b.created > a.created ? 1 : -1));
+  return all;
+}

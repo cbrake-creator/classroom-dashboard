@@ -87,13 +87,13 @@ router.post('/:roomId/start-session', async (req, res) => {
   if (refs.pearl) {
     const pearlId = refs.pearl.id;
     const pearlHost = refs.pearl.ip;
-    for (const rec of refs.pearl.recorders) {
-      steps.push(
-        await runStep(`pearl.recorder.start.${rec.id}`, () =>
-          applyCommand(pearlId, () => pearl.startRecorder(pearlHost, rec.id)),
-        ),
-      );
-    }
+    // One-touch: all Pearl recorders simultaneously (matches hardware REC
+    // button behavior — every camera channel captured as a separate file).
+    steps.push(
+      await runStep('pearl.record-all.start', () =>
+        applyCommand(pearlId, () => pearl.startAllRecorders(pearlHost)),
+      ),
+    );
     for (const pub of refs.pearl.publishers) {
       steps.push(
         await runStep(`pearl.publisher.start.${pub.id}`, () =>
@@ -102,6 +102,11 @@ router.post('/:roomId/start-session', async (req, res) => {
       );
     }
   }
+
+  // NB: RAW Rodecaster audio capture on the studio Mac happens via the DAW
+  // sidecar once it's dialed in (ws /sidecar). Until that's finished, the
+  // Pearl recorders are the source of truth for session audio (each Pearl
+  // camera-channel file has embedded audio from the Pearl's routing).
 
   res.json({ ok: steps.every((s) => s.ok), steps });
 });
@@ -122,13 +127,11 @@ router.post('/:roomId/stop-session', async (req, res) => {
         ),
       );
     }
-    for (const rec of refs.pearl.recorders) {
-      steps.push(
-        await runStep(`pearl.recorder.stop.${rec.id}`, () =>
-          applyCommand(pearlId, () => pearl.stopRecorder(pearlHost, rec.id)),
-        ),
-      );
-    }
+    steps.push(
+      await runStep('pearl.record-all.stop', () =>
+        applyCommand(pearlId, () => pearl.stopAllRecorders(pearlHost)),
+      ),
+    );
   }
 
   for (const cam of refs.cams) {
