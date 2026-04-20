@@ -58,20 +58,35 @@ function parseKv(text: string): Record<string, string> {
 export async function getInfo(host: string): Promise<CanonInfo> {
   const res = await client(host).get('/info.cgi', { responseType: 'text' });
   const kv = parseKv(String(res.data));
+  // `f.standby` is the authoritative power-state key: 'standby' or 'idle'.
+  // When the camera is in standby, `c.1.power` is absent entirely, so the
+  // old `kv['c.1.power'] !== 'off'` check reported every standby cam as on.
+  const inStandby = kv['f.standby'] === 'standby';
   return {
-    power: kv['c.1.power'] !== 'off',
+    power: !inStandby,
     panPos: Number(kv['c.1.pt.pan.position'] ?? 0),
     tiltPos: Number(kv['c.1.pt.tilt.position'] ?? 0),
     zoomPos: Number(kv['c.1.zoom.position'] ?? 0),
     autoTrack: kv['c.1.tracking.mode'] === 'on',
-    livescopeStatus: Number(kv['s.livescope.status'] ?? 0),
-    livescopeMsg: kv['s.livescope.message'] ?? 'OK',
+    livescopeStatus: inStandby ? 509 : Number(kv['s.livescope.status'] ?? 0),
+    livescopeMsg: inStandby ? 'Standby' : (kv['s.livescope.message'] ?? 'OK'),
   };
 }
 
+// Canon returns 200 with a short ASCII error body ("--- WebView Livescope
+// Http Server Error --- Standby") when the camera isn't serving live video.
+// Detect by JPEG magic bytes (FF D8) and surface a real error upstream.
 export async function snapshot(host: string): Promise<Buffer> {
-  const res = await client(host).get('/image.cgi?w=1', { responseType: 'arraybuffer' });
-  return Buffer.from(res.data as ArrayBuffer);
+  // NB: the XC API reference says /image.cgi?w=1 but on CR-N300 firmware 1.7.0
+  // that returns "Invalid Parameter Value parameter=w". Calling bare /image.cgi
+  // returns a real 1280x720 JPEG.
+  const res = await client(host).get('/image.cgi', { responseType: 'arraybuffer' });
+  const buf = Buffer.from(res.data as ArrayBuffer);
+  if (buf.length < 2 || buf[0] !== 0xff || buf[1] !== 0xd8) {
+    const text = buf.toString('utf8').trim();
+    throw new Error(`camera did not return JPEG: ${text.slice(0, 120)}`);
+  }
+  return buf;
 }
 
 // ─── Session management ────────────────────────────────────
@@ -153,8 +168,11 @@ export async function home(camId: string, host: string): Promise<void> {
   log.info({ camId }, 'canon home preset');
 }
 
+// `on=true` → put the camera to sleep, `on=false` → wake it.
+// CR-N300 firmware 1.7.0 accepts cmd=idle (wake) and cmd=standby (sleep).
+// The reference doc's cmd=on|off is rejected as "Invalid Parameter Value".
 export async function setStandby(host: string, on: boolean): Promise<void> {
-  await client(host).get('/standby.cgi', { params: { cmd: on ? 'on' : 'off' } });
+  await client(host).get('/standby.cgi', { params: { cmd: on ? 'standby' : 'idle' } });
   log.info({ host, on }, 'canon standby');
 }
 

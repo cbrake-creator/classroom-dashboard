@@ -110,9 +110,17 @@ router.get('/:deviceId/snapshot', async (req, res, next) => {
   try {
     const r = getCamera(req.params.deviceId);
     if (!r.ok) return res.status(r.status).json({ error: r.error });
-    const buf = await canon.snapshot(r.cam.ip);
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.send(buf);
+    try {
+      const buf = await canon.snapshot(r.cam.ip);
+      res.setHeader('Content-Type', 'image/jpeg');
+      // Don't let browsers cache a snapshot — each request should be fresh.
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(buf);
+    } catch (err) {
+      // Standby / unreachable / error-body. Return 503 so the <img>
+      // onerror handler fires cleanly instead of rendering broken bytes.
+      res.status(503).type('text/plain').send((err as Error).message);
+    }
   } catch (err) {
     next(err);
   }
