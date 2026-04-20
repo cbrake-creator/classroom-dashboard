@@ -904,11 +904,15 @@ async function cmd(path, body) {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      console.warn('cmd failed', path, res.status, text);
+      const errMsg = (() => { try { return JSON.parse(text).error || text; } catch { return text; } })();
+      console.warn('cmd failed', path, res.status, errMsg);
+      showToast(`✗ ${path}: ${res.status} ${String(errMsg).slice(0,140)}`, 'error');
+      return false;
     }
-    return res.ok;
+    return true;
   } catch (err) {
     console.warn('cmd error', path, err);
+    showToast(`✗ ${path}: ${err.message}`, 'error');
     return false;
   }
 }
@@ -1326,7 +1330,7 @@ function renderCameraBody(device) {
       ` : ''}
       ${isOnline
         ? `<img class="cam-preview" data-deviceid="${device.id}" alt="Live preview" style="width:100%; height:100%; object-fit:cover; display:block; background:#000;"
-             src="${BACKEND_URL}/api/canon/${device.id}/snapshot?t=${Date.now()}"
+             src="${BACKEND_URL}/api/canon/${device.id}/mjpeg"
              onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
              onload="this.style.display='block'; this.nextElementSibling.style.display='none';">
            <div class="camera-feed-placeholder" style="display:none;">
@@ -1334,7 +1338,7 @@ function renderCameraBody(device) {
                <rect x="2" y="5" width="15" height="14" rx="2"/>
                <polygon points="22,7 17,12 22,17"/>
              </svg>
-             <span>Preview unavailable</span>
+             <span>Preview unavailable — camera may be in standby</span>
            </div>`
         : `<div class="camera-feed-placeholder">
              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1930,15 +1934,23 @@ async function bootstrap() {
     render();
   });
 
-  // Live camera previews — refresh every ~2s by reloading each visible <img class="cam-preview">
-  // with a cache-busting timestamp. Cheap and uses the existing /snapshot endpoint.
-  setInterval(() => {
-    document.querySelectorAll('img.cam-preview').forEach((img) => {
-      const id = img.getAttribute('data-deviceid');
-      if (!id) return;
-      img.src = `${BACKEND_URL}/api/canon/${id}/snapshot?t=${Date.now()}`;
-    });
-  }, 2000);
+  // Live camera previews are now true MJPEG streams (multipart/x-mixed-replace),
+  // so the browser handles per-frame updates — no JS polling needed.
+}
+
+function showToast(msg, kind) {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    host.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:420px;';
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.textContent = msg;
+  el.style.cssText = `background:${kind === 'error' ? '#b91c1c' : '#1e3a8a'};color:#fff;padding:10px 14px;border-radius:6px;font-size:13px;font-family:-apple-system,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.4);animation:toastIn .15s ease-out;`;
+  host.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 4500);
 }
 
 bootstrap();

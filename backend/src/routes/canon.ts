@@ -2,7 +2,9 @@
 //  Canon CR-N300 commands. Each handler resolves the camera's
 //  IP from the in-memory state, then calls the canon client.
 // ──────────────────────────────────────────────────────────
+import http from 'node:http';
 import { Router } from 'express';
+import { config } from '../config.js';
 import * as canon from '../devices/canon.js';
 import { applyCommand } from '../services/deviceManager.js';
 import { getDevice } from '../services/roomState.js';
@@ -124,6 +126,48 @@ router.get('/:deviceId/snapshot', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// MJPEG streaming proxy — pipes Canon's /video.cgi (multipart/x-mixed-replace)
+// straight through to the browser. One upstream connection per client request.
+// Much better than snapshot polling: true live video, no per-frame HTTP overhead.
+router.get('/:deviceId/mjpeg', (req, res) => {
+  const r = getCamera(req.params.deviceId);
+  if (!r.ok) return res.status(r.status).json({ error: r.error });
+
+  const upstream = http.request(
+    {
+      host: r.cam.ip,
+      port: 80,
+      path: '/-wvhttp-01-/video.cgi',
+      method: 'GET',
+      auth: `${config.canonAuth.username}:${config.canonAuth.password}`,
+      timeout: 5000,
+    },
+    (up) => {
+      if (up.statusCode !== 200 || !String(up.headers['content-type'] ?? '').startsWith('multipart/')) {
+        res.status(503).type('text/plain').end('camera not streaming (standby?)');
+        up.destroy();
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': up.headers['content-type'],
+        'Cache-Control': 'no-store',
+        'Connection': 'close',
+      });
+      up.pipe(res);
+    },
+  );
+  upstream.on('error', (err) => {
+    if (!res.headersSent) res.status(503).type('text/plain').end(`upstream error: ${err.message}`);
+  });
+  upstream.on('timeout', () => {
+    upstream.destroy();
+    if (!res.headersSent) res.status(504).type('text/plain').end('upstream timeout');
+  });
+  // Browser navigated away — kill the upstream to free the Canon slot.
+  req.on('close', () => upstream.destroy());
+  upstream.end();
 });
 
 export default router;

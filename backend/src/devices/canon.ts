@@ -1,13 +1,32 @@
 // ──────────────────────────────────────────────────────────
-//  Canon CR-N300 / XC HTTP CGI client.
-//  See ~/Projects/classroom-dashboard/canon-xc-api-reference.md
+//  Canon CR-N300 client.
 //
-//  Base: http://<host>/-wvhttp-01-/
-//  Auth: HTTP Basic
+//  The bundled `canon-xc-api-reference.md` proved unreliable
+//  against CR-N300 firmware 1.7.0 — the real protocol (tested
+//  live against 10.56.24.217) is:
 //
-//  Session lifecycle:
-//    open.cgi → claim.cgi → operate → yield.cgi → close.cgi
-//  Each camera has at most one session at a time.
+//    Base: http://<host>/-wvhttp-01-/
+//    Auth: HTTP Basic
+//
+//    open.cgi            → returns a body whose first line is
+//                          `s:=<session-id>` (NOT `s.session.id:=`)
+//    claim.cgi?s=<sid>   → promotes this session to control master
+//    yield.cgi?s=<sid>   → releases control
+//    close.cgi?s=<sid>   → ends the session
+//
+//    control.cgi?s=<sid>&c.1.pan=<v>   → absolute pan (-17000..17000)
+//    control.cgi?s=<sid>&c.1.tilt=<v>  → absolute tilt (-3000..10000)
+//    control.cgi?s=<sid>&c.1.zoom=<v>  → absolute zoom (340..6340)
+//    control.cgi?s=<sid>&c.1.focus.auto.track=on|off
+//
+//    standby.cgi?cmd=idle     → wake
+//    standby.cgi?cmd=standby  → sleep
+//
+//    image.cgi   → single JPEG (NO `w` param — passing one errors)
+//    video.cgi   → live MJPEG multipart/x-mixed-replace stream
+//
+//    f.standby   → 'idle' | 'standby' (authoritative power state;
+//                  c.1.power is absent during standby)
 // ──────────────────────────────────────────────────────────
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../config.js';
@@ -31,6 +50,11 @@ interface SessionState {
 }
 const sessions = new Map<string, SessionState>();
 
+// PTZ step sizes. Pan/tilt are ~±10°/click; zoom is ~1 step of the wide→tele range.
+const PAN_STEP = 500;
+const TILT_STEP = 300;
+const ZOOM_STEP = 300;
+
 function client(host: string): AxiosInstance {
   return axios.create({
     baseURL: `http://${host}/-wvhttp-01-`,
@@ -44,42 +68,47 @@ function getSession(camId: string): SessionState {
   return sessions.get(camId)!;
 }
 
-// Parse the simple key=value response Canon returns from CGIs.
+// Parse the simple key=value response Canon returns. Each line looks like
+// `key:=value`. Canon also uses `key==value` in some responses (e.g.
+// s.duration==0). Handle both.
 function parseKv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
-    const idx = line.indexOf('=');
-    if (idx > 0) out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+    const m = line.match(/^([^=]+?):?==?(.*)$/);
+    if (m) out[m[1]!.trim()] = m[2]!.trim();
   }
   return out;
+}
+
+// Any Canon CGI can return HTTP 200 with an ASCII error body
+// ('--- WebView Livescope Http Server Error --- <reason>'). Detect and throw
+// so callers can react instead of treating success as a silent failure.
+function assertNotErrorBody(text: string): void {
+  if (text.startsWith('--- WebView Livescope Http Server Error ---')) {
+    const reason = text.split('\n').slice(1).join(' ').trim();
+    throw new Error(`canon error: ${reason || 'unknown'}`);
+  }
 }
 
 // ─── Reads ─────────────────────────────────────────────────
 export async function getInfo(host: string): Promise<CanonInfo> {
   const res = await client(host).get('/info.cgi', { responseType: 'text' });
   const kv = parseKv(String(res.data));
-  // `f.standby` is the authoritative power-state key: 'standby' or 'idle'.
-  // When the camera is in standby, `c.1.power` is absent entirely, so the
-  // old `kv['c.1.power'] !== 'off'` check reported every standby cam as on.
   const inStandby = kv['f.standby'] === 'standby';
   return {
     power: !inStandby,
-    panPos: Number(kv['c.1.pt.pan.position'] ?? 0),
-    tiltPos: Number(kv['c.1.pt.tilt.position'] ?? 0),
-    zoomPos: Number(kv['c.1.zoom.position'] ?? 0),
-    autoTrack: kv['c.1.tracking.mode'] === 'on',
-    livescopeStatus: inStandby ? 509 : Number(kv['s.livescope.status'] ?? 0),
-    livescopeMsg: inStandby ? 'Standby' : (kv['s.livescope.message'] ?? 'OK'),
+    panPos: Number(kv['c.1.pan'] ?? 0),
+    tiltPos: Number(kv['c.1.tilt'] ?? 0),
+    zoomPos: Number(kv['c.1.zoom'] ?? 0),
+    autoTrack: kv['c.1.focus.auto.track'] === 'on',
+    livescopeStatus: inStandby ? 509 : 0,
+    livescopeMsg: inStandby ? 'Standby' : 'OK',
   };
 }
 
-// Canon returns 200 with a short ASCII error body ("--- WebView Livescope
-// Http Server Error --- Standby") when the camera isn't serving live video.
-// Detect by JPEG magic bytes (FF D8) and surface a real error upstream.
+// Canon returns 200 with an ASCII error body when the camera isn't serving
+// live video (standby, booting, etc). Validate JPEG magic bytes.
 export async function snapshot(host: string): Promise<Buffer> {
-  // NB: the XC API reference says /image.cgi?w=1 but on CR-N300 firmware 1.7.0
-  // that returns "Invalid Parameter Value parameter=w". Calling bare /image.cgi
-  // returns a real 1280x720 JPEG.
   const res = await client(host).get('/image.cgi', { responseType: 'arraybuffer' });
   const buf = Buffer.from(res.data as ArrayBuffer);
   if (buf.length < 2 || buf[0] !== 0xff || buf[1] !== 0xd8) {
@@ -90,19 +119,33 @@ export async function snapshot(host: string): Promise<Buffer> {
 }
 
 // ─── Session management ────────────────────────────────────
-export async function claim(camId: string, host: string): Promise<void> {
-  const c = client(host);
+async function ensureClaimed(camId: string, host: string): Promise<string> {
   const sess = getSession(camId);
+  if (sess.sessionId && sess.claimed) return sess.sessionId;
+
+  const c = client(host);
   if (!sess.sessionId) {
     const open = await c.get('/open.cgi', { responseType: 'text' });
-    const kv = parseKv(String(open.data));
-    sess.sessionId = kv['s.session.id'] ?? null;
+    const body = String(open.data);
+    assertNotErrorBody(body);
+    const kv = parseKv(body);
+    // open.cgi puts the session id in `s:=...` on the first line.
+    const sid = kv['s'] ?? null;
+    if (!sid) throw new Error('canon open.cgi returned no session id');
+    sess.sessionId = sid;
   }
-  if (sess.sessionId) {
-    await c.get(`/claim.cgi?s.session.id=${sess.sessionId}`);
-    sess.claimed = true;
-    log.info({ camId, sessionId: sess.sessionId }, 'canon control claimed');
-  }
+  const claimRes = await c.get('/claim.cgi', {
+    params: { s: sess.sessionId },
+    responseType: 'text',
+  });
+  assertNotErrorBody(String(claimRes.data));
+  sess.claimed = true;
+  log.info({ camId, sessionId: sess.sessionId }, 'canon control claimed');
+  return sess.sessionId;
+}
+
+export async function claim(camId: string, host: string): Promise<void> {
+  await ensureClaimed(camId, host);
 }
 
 export async function release(camId: string, host: string): Promise<void> {
@@ -110,8 +153,8 @@ export async function release(camId: string, host: string): Promise<void> {
   const sess = getSession(camId);
   if (!sess.sessionId) return;
   try {
-    await c.get(`/yield.cgi?s.session.id=${sess.sessionId}`);
-    await c.get(`/close.cgi?s.session.id=${sess.sessionId}`);
+    if (sess.claimed) await c.get('/yield.cgi', { params: { s: sess.sessionId } }).catch(() => {});
+    await c.get('/close.cgi', { params: { s: sess.sessionId } }).catch(() => {});
   } finally {
     sess.sessionId = null;
     sess.claimed = false;
@@ -119,71 +162,68 @@ export async function release(camId: string, host: string): Promise<void> {
   }
 }
 
+async function sendControl(camId: string, host: string, param: string, value: string | number): Promise<void> {
+  const sid = await ensureClaimed(camId, host);
+  const res = await client(host).get('/control.cgi', {
+    params: { s: sid, [param]: String(value) },
+    responseType: 'text',
+  });
+  assertNotErrorBody(String(res.data));
+}
+
+// Canon control params are absolute positions, so nudging means fetch + add + send.
+async function adjust(camId: string, host: string, param: 'c.1.pan' | 'c.1.tilt' | 'c.1.zoom', delta: number, min: number, max: number): Promise<void> {
+  const info = await getInfo(host);
+  const current = param === 'c.1.pan' ? info.panPos : param === 'c.1.tilt' ? info.tiltPos : info.zoomPos;
+  const target = Math.max(min, Math.min(max, current + delta));
+  await sendControl(camId, host, param, target);
+}
+
 // ─── PTZ ───────────────────────────────────────────────────
 type PtzAction = 'pan-left' | 'pan-right' | 'tilt-up' | 'tilt-down';
 
 export async function ptz(camId: string, host: string, action: PtzAction): Promise<void> {
-  const sess = getSession(camId);
-  if (!sess.sessionId) await claim(camId, host);
-  const params: Record<string, string> = { 's.session.id': sess.sessionId ?? '' };
   switch (action) {
     case 'pan-left':
-      params['c.1.pt.pan.target'] = '-100';
+      await adjust(camId, host, 'c.1.pan', -PAN_STEP, -17000, 17000);
       break;
     case 'pan-right':
-      params['c.1.pt.pan.target'] = '+100';
+      await adjust(camId, host, 'c.1.pan', +PAN_STEP, -17000, 17000);
       break;
     case 'tilt-up':
-      params['c.1.pt.tilt.target'] = '+50';
+      await adjust(camId, host, 'c.1.tilt', +TILT_STEP, -3000, 10000);
       break;
     case 'tilt-down':
-      params['c.1.pt.tilt.target'] = '-50';
+      await adjust(camId, host, 'c.1.tilt', -TILT_STEP, -3000, 10000);
       break;
   }
-  await client(host).get('/control.cgi', { params });
   log.info({ camId, action }, 'canon ptz');
 }
 
 export async function zoom(camId: string, host: string, direction: 'in' | 'out'): Promise<void> {
-  const sess = getSession(camId);
-  if (!sess.sessionId) await claim(camId, host);
-  await client(host).get('/control.cgi', {
-    params: {
-      's.session.id': sess.sessionId ?? '',
-      'c.1.zoom.target': direction === 'in' ? '+200' : '-200',
-    },
-  });
+  await adjust(camId, host, 'c.1.zoom', direction === 'in' ? +ZOOM_STEP : -ZOOM_STEP, 340, 6340);
   log.info({ camId, direction }, 'canon zoom');
 }
 
+// "Home" → pan 0, tilt 0, modest zoom.
 export async function home(camId: string, host: string): Promise<void> {
-  const sess = getSession(camId);
-  if (!sess.sessionId) await claim(camId, host);
-  await client(host).get('/control.cgi', {
-    params: {
-      's.session.id': sess.sessionId ?? '',
-      'c.1.preset.recall': 'home',
-    },
-  });
-  log.info({ camId }, 'canon home preset');
+  await sendControl(camId, host, 'c.1.pan', 0);
+  await sendControl(camId, host, 'c.1.tilt', 0);
+  await sendControl(camId, host, 'c.1.zoom', 1000);
+  log.info({ camId }, 'canon home');
 }
 
-// `on=true` → put the camera to sleep, `on=false` → wake it.
-// CR-N300 firmware 1.7.0 accepts cmd=idle (wake) and cmd=standby (sleep).
-// The reference doc's cmd=on|off is rejected as "Invalid Parameter Value".
 export async function setStandby(host: string, on: boolean): Promise<void> {
-  await client(host).get('/standby.cgi', { params: { cmd: on ? 'standby' : 'idle' } });
+  // cmd=idle wakes, cmd=standby sleeps. Reference doc's on|off is rejected.
+  const res = await client(host).get('/standby.cgi', {
+    params: { cmd: on ? 'standby' : 'idle' },
+    responseType: 'text',
+  });
+  assertNotErrorBody(String(res.data));
   log.info({ host, on }, 'canon standby');
 }
 
 export async function setAutoTrack(camId: string, host: string, enabled: boolean): Promise<void> {
-  const sess = getSession(camId);
-  if (!sess.sessionId) await claim(camId, host);
-  await client(host).get('/control.cgi', {
-    params: {
-      's.session.id': sess.sessionId ?? '',
-      'c.1.tracking.mode': enabled ? 'on' : 'off',
-    },
-  });
+  await sendControl(camId, host, 'c.1.focus.auto.track', enabled ? 'on' : 'off');
   log.info({ camId, enabled }, 'canon autotrack');
 }
