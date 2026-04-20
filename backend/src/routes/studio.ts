@@ -14,7 +14,8 @@ import * as pearl from '../devices/pearl.js';
 import { logger } from '../logger.js';
 import { applyCommand } from '../services/deviceManager.js';
 import { getRoom } from '../services/roomState.js';
-import type { CameraDevice, MacDevice, PearlDevice } from '../types.js';
+import type { CameraDevice, DawDevice, MacDevice, PearlDevice } from '../types.js';
+import { sendDawCommand } from '../ws/sidecarServer.js';
 
 const log = logger.child({ svc: 'studio' });
 const router = Router();
@@ -22,16 +23,18 @@ const router = Router();
 interface StudioRefs {
   pearl: PearlDevice | null;
   mac: MacDevice | null;
+  daw: DawDevice | null;
   cams: CameraDevice[];
 }
 
 function resolveStudio(roomId: string): StudioRefs | null {
   const found = getRoom(roomId);
   if (!found) return null;
-  const refs: StudioRefs = { pearl: null, mac: null, cams: [] };
+  const refs: StudioRefs = { pearl: null, mac: null, daw: null, cams: [] };
   for (const d of found.room.devices) {
     if (d.type === 'pearl') refs.pearl = d;
     else if (d.type === 'mac') refs.mac = d;
+    else if (d.type === 'daw') refs.daw = d;
     else if (d.type === 'camera') refs.cams.push(d);
   }
   return refs;
@@ -41,6 +44,7 @@ interface StepResult {
   step: string;
   ok: boolean;
   error?: string;
+  latencyMs?: number;
 }
 
 async function runStep(name: string, fn: () => Promise<unknown>): Promise<StepResult> {
@@ -49,8 +53,12 @@ async function runStep(name: string, fn: () => Promise<unknown>): Promise<StepRe
     return { step: name, ok: true };
   }
   try {
-    await fn();
-    return { step: name, ok: true };
+    const result = await fn();
+    const r: StepResult = { step: name, ok: true };
+    if (result && typeof result === 'object' && 'latencyMs' in result) {
+      r.latencyMs = (result as { latencyMs: number }).latencyMs;
+    }
+    return r;
   } catch (err) {
     const msg = (err as Error).message ?? 'unknown';
     log.warn({ step: name, err: msg }, 'studio step failed');
@@ -84,16 +92,49 @@ router.post('/:roomId/start-session', async (req, res) => {
     steps.push(await runStep(`canon.claim.${cam.id}`, () => canon.claim(cam.id, cam.ip)));
   }
 
+  // ── Tightly-synchronized record start ───────────────────────
+  //
+  // We want the Pearl's one-touch recorders AND the DAW sidecar's multi-track
+  // RAW capture to begin as close to the same instant as possible. We can't
+  // get sample-level sync across independent clocks (Pearl's internal clock
+  // ≠ Rodecaster USB clock), but we can fire both commands in the same
+  // Promise.all tick so the wall-clock skew is just network round-trip — a
+  // few milliseconds over LAN. Post-production alignment beyond that is the
+  // editor's job (clap, count-in, or embedded timecode).
+  //
+  // Pre-compute the sends. Capture t0 on each as close to dispatch as
+  // possible and surface the skew in the step result so the user can see it.
+  const starts: Promise<StepResult>[] = [];
+
   if (refs.pearl) {
     const pearlId = refs.pearl.id;
     const pearlHost = refs.pearl.ip;
-    // One-touch: all Pearl recorders simultaneously (matches hardware REC
-    // button behavior — every camera channel captured as a separate file).
-    steps.push(
-      await runStep('pearl.record-all.start', () =>
-        applyCommand(pearlId, () => pearl.startAllRecorders(pearlHost)),
-      ),
-    );
+    starts.push(runStep('pearl.record-all.start', async () => {
+      const t0 = Date.now();
+      await applyCommand(pearlId, () => pearl.startAllRecorders(pearlHost));
+      return { latencyMs: Date.now() - t0 };
+    }));
+  }
+
+  if (refs.daw) {
+    const dawId = refs.daw.id;
+    starts.push(runStep('daw.record-start', async () => {
+      const t0 = Date.now();
+      const delivered = sendDawCommand(dawId, 'record-start');
+      if (!delivered) throw new Error('DAW sidecar not connected');
+      return { latencyMs: Date.now() - t0 };
+    }));
+  }
+
+  // Fire both simultaneously. Promise.all dispatches in the same microtask.
+  const results = await Promise.all(starts);
+  steps.push(...results);
+
+  // Publishers fire after the record-start wave — streaming latency isn't
+  // critical for sync and RTMP negotiation can take a second.
+  if (refs.pearl) {
+    const pearlId = refs.pearl.id;
+    const pearlHost = refs.pearl.ip;
     for (const pub of refs.pearl.publishers) {
       steps.push(
         await runStep(`pearl.publisher.start.${pub.id}`, () =>
@@ -102,11 +143,6 @@ router.post('/:roomId/start-session', async (req, res) => {
       );
     }
   }
-
-  // NB: RAW Rodecaster audio capture on the studio Mac happens via the DAW
-  // sidecar once it's dialed in (ws /sidecar). Until that's finished, the
-  // Pearl recorders are the source of truth for session audio (each Pearl
-  // camera-channel file has embedded audio from the Pearl's routing).
 
   res.json({ ok: steps.every((s) => s.ok), steps });
 });
@@ -117,6 +153,9 @@ router.post('/:roomId/stop-session', async (req, res) => {
   if (!refs) return res.status(404).json({ error: 'room not found' });
   const steps: StepResult[] = [];
 
+  // Stop publishers first (streaming can keep finalizing its last segment for
+  // a beat), then parallel-fire the Pearl + DAW record stops so the trailing
+  // edges are aligned to the same wall-clock instant.
   if (refs.pearl) {
     const pearlId = refs.pearl.id;
     const pearlHost = refs.pearl.ip;
@@ -127,12 +166,28 @@ router.post('/:roomId/stop-session', async (req, res) => {
         ),
       );
     }
-    steps.push(
-      await runStep('pearl.record-all.stop', () =>
-        applyCommand(pearlId, () => pearl.stopAllRecorders(pearlHost)),
-      ),
-    );
   }
+
+  const stops: Promise<StepResult>[] = [];
+  if (refs.pearl) {
+    const pearlId = refs.pearl.id;
+    const pearlHost = refs.pearl.ip;
+    stops.push(runStep('pearl.record-all.stop', async () => {
+      const t0 = Date.now();
+      await applyCommand(pearlId, () => pearl.stopAllRecorders(pearlHost));
+      return { latencyMs: Date.now() - t0 };
+    }));
+  }
+  if (refs.daw) {
+    const dawId = refs.daw.id;
+    stops.push(runStep('daw.record-stop', async () => {
+      const t0 = Date.now();
+      const delivered = sendDawCommand(dawId, 'record-stop');
+      if (!delivered) throw new Error('DAW sidecar not connected');
+      return { latencyMs: Date.now() - t0 };
+    }));
+  }
+  steps.push(...(await Promise.all(stops)));
 
   for (const cam of refs.cams) {
     steps.push(await runStep(`canon.release.${cam.id}`, () => canon.release(cam.id, cam.ip)));
