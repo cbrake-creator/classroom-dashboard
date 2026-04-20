@@ -751,6 +751,57 @@
   .studio-session-actions { display: flex; gap: 8px; }
 
   /* Pearl card */
+  .pearl-onetouch {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 14px; margin-bottom: 14px;
+    background: var(--bg-primary); border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .pearl-onetouch.recording {
+    background: rgba(239, 68, 68, 0.10);
+    border-color: var(--red-border, rgba(239,68,68,.45));
+    box-shadow: 0 0 0 1px rgba(239,68,68,.25) inset;
+  }
+  .pearl-rec-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    min-width: 120px; height: 56px; padding: 0 18px;
+    background: #991b1b; color: #fff; border: none; border-radius: 8px;
+    font-size: 16px; font-weight: 800; letter-spacing: 1px; cursor: pointer;
+    transition: transform .08s, background .15s, box-shadow .2s;
+    box-shadow: 0 2px 0 rgba(0,0,0,.25) inset;
+  }
+  .pearl-rec-btn:hover:not(:disabled) { background: #b91c1c; }
+  .pearl-rec-btn:active:not(:disabled) { transform: translateY(1px); }
+  .pearl-rec-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .pearl-rec-btn.recording {
+    background: #dc2626;
+    box-shadow: 0 0 0 2px rgba(239,68,68,.6), 0 0 20px rgba(239,68,68,.4);
+    animation: pearl-rec-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pearl-rec-pulse {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(239,68,68,.6), 0 0 20px rgba(239,68,68,.4); }
+    50%      { box-shadow: 0 0 0 2px rgba(239,68,68,.9), 0 0 28px rgba(239,68,68,.75); }
+  }
+  .pearl-rec-dot {
+    width: 14px; height: 14px; border-radius: 50%; background: #fff;
+    box-shadow: 0 0 6px rgba(255,255,255,.6);
+  }
+  .pearl-rec-btn.recording .pearl-rec-dot {
+    background: #fff; animation: pearl-rec-dot-pulse 1s ease-in-out infinite;
+  }
+  @keyframes pearl-rec-dot-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.55; }
+  }
+  .pearl-rec-label { font-family: 'SF Mono', monospace; }
+  .pearl-rec-meta { display: flex; flex-direction: column; gap: 2px; }
+  .pearl-rec-time {
+    font-family: 'SF Mono', monospace; font-size: 22px; font-weight: 600;
+    color: var(--text); letter-spacing: 1px;
+  }
+  .pearl-onetouch.recording .pearl-rec-time { color: var(--red); }
+  .pearl-rec-sub { font-size: 11px; color: var(--text-muted); }
+
   .pearl-state-row {
     display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;
   }
@@ -1632,7 +1683,28 @@ function renderPearlBody(device) {
   const tempClass = device.temp > 75 ? 'error' : device.temp > 65 ? 'warn' : 'ok';
   const storageClass = storagePctFree < 10 ? 'error' : storagePctFree < 25 ? 'warn' : 'ok';
 
+  // Duration of the first recording recorder — all recorders start
+  // together via one-touch, so any one is representative.
+  const activeRec = (device.recorders || []).find(r => r.state === 'recording');
+  const durSec = activeRec ? Math.floor(activeRec.durationSec || 0) : 0;
+  const durStr = `${Math.floor(durSec/3600).toString().padStart(2,'0')}:${Math.floor((durSec%3600)/60).toString().padStart(2,'0')}:${(durSec%60).toString().padStart(2,'0')}`;
+
   return `
+    <!-- One-touch record — mirrors the hardware REC button on the Pearl -->
+    <div class="pearl-onetouch ${recording ? 'recording' : ''}">
+      <button class="pearl-rec-btn ${recording ? 'recording' : ''}"
+              onclick="cmd('/api/pearl/${device.id}/record-all/${recording ? 'stop' : 'start'}')"
+              title="POST /api/pearl/${device.id}/record-all/${recording ? 'stop' : 'start'}"
+              ${isOnline ? '' : 'disabled'}>
+        <span class="pearl-rec-dot"></span>
+        <span class="pearl-rec-label">${recording ? 'STOP' : 'REC'}</span>
+      </button>
+      <div class="pearl-rec-meta">
+        <div class="pearl-rec-time">${recording ? durStr : '00:00:00'}</div>
+        <div class="pearl-rec-sub">${(device.recorders || []).length} recorder${(device.recorders||[]).length === 1 ? '' : 's'} · ${recording ? 'Recording all' : 'Idle'}</div>
+      </div>
+    </div>
+
     <!-- Encoder state pills -->
     <div class="pearl-state-row">
       ${recording

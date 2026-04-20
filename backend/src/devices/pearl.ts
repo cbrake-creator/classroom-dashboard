@@ -98,10 +98,14 @@ export async function getRecorders(host: string): Promise<PearlRecorder[]> {
         .get(`/recorders/${id}/status`)
         .then((rr) => rr.data?.result ?? rr.data ?? {})
         .catch(() => ({}));
+      // Pearl firmware 4.x reports state as 'started' | 'stopped'. Normalize
+      // to the PearlRecorder 'recording' | 'stopped' enum the dashboard uses.
+      const raw = String(status.state ?? 'stopped');
+      const state: PearlRecorder['state'] = raw === 'started' ? 'recording' : 'stopped';
       return {
         id,
         name: String(r.name ?? `Recorder ${id}`),
-        state: (status.state ?? 'stopped') as PearlRecorder['state'],
+        state,
         durationSec: Number(status.duration ?? 0),
       };
     }),
@@ -137,6 +141,20 @@ export async function getSources(host: string): Promise<PearlSource[]> {
 }
 
 // ─── Writes / commands ─────────────────────────────────────
+// One-touch recording: Pearl has a batch endpoint that starts/stops every
+// recorder in parallel — matches the hardware button on the front of the
+// device. Use this instead of looping if you want all recorders to start
+// at exactly the same moment.
+export async function startAllRecorders(host: string): Promise<void> {
+  await client(host).post('/recorders/control/start');
+  log.info({ host }, 'pearl one-touch record start');
+}
+
+export async function stopAllRecorders(host: string): Promise<void> {
+  await client(host).post('/recorders/control/stop');
+  log.info({ host }, 'pearl one-touch record stop');
+}
+
 export async function startRecorder(host: string, id: number): Promise<void> {
   await client(host).post(`/recorders/${id}/control/start`);
   log.info({ host, id }, 'pearl recorder start');

@@ -20,6 +20,25 @@ function getPearl(deviceId: string):
   return { ok: true, dev: found.device };
 }
 
+// One-touch recording — start/stop every recorder on the Pearl at once.
+// Matches the hardware REC button on the front of the device.
+router.post('/:deviceId/record-all/:action', async (req, res, next) => {
+  try {
+    const r = getPearl(req.params.deviceId);
+    if (!r.ok) return res.status(r.status).json({ error: r.error });
+    const action = req.params.action;
+    if (action !== 'start' && action !== 'stop') {
+      return res.status(400).json({ error: "action must be 'start' or 'stop'" });
+    }
+    await applyCommand(req.params.deviceId, () =>
+      action === 'start' ? pearl.startAllRecorders(r.dev.ip) : pearl.stopAllRecorders(r.dev.ip),
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/:deviceId/recorder/:id/start', async (req, res, next) => {
   try {
     const r = getPearl(req.params.deviceId);
