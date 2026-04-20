@@ -246,9 +246,10 @@ function makeFacultyPodcastStudio(): Room {
     powerTransition: null,
   });
 
-  // Faculty Podcast Studio's Pearl is not currently on the network (user
-  // confirmed Tech Talk Pearl at .246 is for student Tech Talks, not Faculty
-  // Podcast). Omitting Pearl from this room until the correct IP is known.
+  // Faculty Podcast Studio's Pearl 2 — mDNS-advertised as its serial
+  // "TS25901165" instead of a friendly name, which is why it didn't show up
+  // in the first "Pearl"-filtered scan.
+  const pearl = makePearlStub('10.56.1.250', 'Faculty Podcast Pearl');
 
   const mac: MacDevice = {
     id: 'mac-1',
@@ -348,7 +349,7 @@ function makeFacultyPodcastStudio(): Room {
     id: 'faculty-podcast',
     name: 'Faculty Podcast Studio',
     type: 'studio',
-    devices: [cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, rodecaster, daw],
+    devices: [pearl, cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, rodecaster, daw],
   };
 }
 
