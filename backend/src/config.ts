@@ -43,10 +43,13 @@ export const config = {
   pollIntervalMs: envNumber('DEVICE_POLL_INTERVAL_MS', 5000),
   deviceMode: mode,
 
-  allowedOrigins: (envOptional('ALLOWED_ORIGINS') ?? 'http://localhost:3000')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
+  // A list of origin strings, OR the single literal '*' for any origin.
+  // Socket.IO + cors() both accept '*' as a wildcard.
+  allowedOrigins: (() => {
+    const raw = envOptional('ALLOWED_ORIGINS') ?? 'http://localhost:3000';
+    const list = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    return list.length === 1 && list[0] === '*' ? '*' : list;
+  })() as string | string[],
 
   pearl: {
     host: envOptional('PEARL_HOST') ?? '10.56.1.138',

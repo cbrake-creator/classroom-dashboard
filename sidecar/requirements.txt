@@ -1,0 +1,6 @@
+sounddevice>=0.4.7
+soundfile>=0.12.1
+numpy>=1.26
+python-socketio[client]>=5.11.0
+python-dotenv>=1.0.0
+requests>=2.32.0

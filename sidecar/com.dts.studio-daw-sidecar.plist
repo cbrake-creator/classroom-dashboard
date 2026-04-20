@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd config: auto-start the sidecar at login on the studio Mac.
+
+     Install:
+       cp com.dts.studio-daw-sidecar.plist ~/Library/LaunchAgents/
+       # Edit the copy to set the absolute path to daemon.py and to your venv python
+       launchctl load ~/Library/LaunchAgents/com.dts.studio-daw-sidecar.plist
+
+     Uninstall:
+       launchctl unload ~/Library/LaunchAgents/com.dts.studio-daw-sidecar.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dts.studio-daw-sidecar</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- EDIT these two paths for your install location -->
+    <string>/Users/studio/Projects/classroom-dashboard/sidecar/venv/bin/python</string>
+    <string>/Users/studio/Projects/classroom-dashboard/sidecar/daemon.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/studio/Projects/classroom-dashboard/sidecar</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/studio/Library/Logs/studio-daw-sidecar.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/studio/Library/Logs/studio-daw-sidecar.log</string>
+</dict>
+</plist>
