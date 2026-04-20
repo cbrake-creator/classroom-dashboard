@@ -163,12 +163,31 @@ export async function release(camId: string, host: string): Promise<void> {
 }
 
 async function sendControl(camId: string, host: string, param: string, value: string | number): Promise<void> {
-  const sid = await ensureClaimed(camId, host);
-  const res = await client(host).get('/control.cgi', {
-    params: { s: sid, [param]: String(value) },
-    responseType: 'text',
-  });
-  assertNotErrorBody(String(res.data));
+  const run = async () => {
+    const sid = await ensureClaimed(camId, host);
+    const res = await client(host).get('/control.cgi', {
+      params: { s: sid, [param]: String(value) },
+      responseType: 'text',
+    });
+    assertNotErrorBody(String(res.data));
+  };
+  try {
+    await run();
+  } catch (err) {
+    // The camera purges sessions after reboot / timeout / when another
+    // client claims. Detect "Unknown Connection ID", drop our cached
+    // session, open a new one, and retry once.
+    const msg = (err as Error).message ?? '';
+    if (/Unknown Connection ID|Invalid Session/i.test(msg)) {
+      log.warn({ camId, msg }, 'canon session invalid — re-opening');
+      const sess = getSession(camId);
+      sess.sessionId = null;
+      sess.claimed = false;
+      await run();
+      return;
+    }
+    throw err;
+  }
 }
 
 // Canon control params are absolute positions, so nudging means fetch + add + send.
