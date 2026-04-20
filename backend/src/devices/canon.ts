@@ -201,7 +201,9 @@ export async function ptz(camId: string, host: string, action: PtzAction): Promi
 }
 
 export async function zoom(camId: string, host: string, direction: 'in' | 'out'): Promise<void> {
-  await adjust(camId, host, 'c.1.zoom', direction === 'in' ? +ZOOM_STEP : -ZOOM_STEP, 340, 6340);
+  // CR-N300: c.1.zoom.min (340) is actually the most-telephoto end; increasing
+  // the value widens the field of view. So `in` means *decrease* c.1.zoom.
+  await adjust(camId, host, 'c.1.zoom', direction === 'in' ? -ZOOM_STEP : +ZOOM_STEP, 340, 6340);
   log.info({ camId, direction }, 'canon zoom');
 }
 
@@ -211,6 +213,14 @@ export async function home(camId: string, host: string): Promise<void> {
   await sendControl(camId, host, 'c.1.tilt', 0);
   await sendControl(camId, host, 'c.1.zoom', 1000);
   log.info({ camId }, 'canon home');
+}
+
+// Absolute move — used by preset recall to jump every camera to a saved spot.
+export async function moveTo(camId: string, host: string, pan: number, tilt: number, zoom: number): Promise<void> {
+  await sendControl(camId, host, 'c.1.pan', Math.max(-17000, Math.min(17000, pan)));
+  await sendControl(camId, host, 'c.1.tilt', Math.max(-3000, Math.min(10000, tilt)));
+  await sendControl(camId, host, 'c.1.zoom', Math.max(340, Math.min(6340, zoom)));
+  log.info({ camId, pan, tilt, zoom }, 'canon moveTo');
 }
 
 export async function setStandby(host: string, on: boolean): Promise<void> {

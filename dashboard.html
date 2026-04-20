@@ -698,6 +698,41 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
   }
+  .preset-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 20px;
+  }
+  .preset-panel-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .preset-panel-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .preset-panel-sub { font-size: 11px; color: var(--text-muted); }
+  .preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+  .preset-tile {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px 10px; border-radius: 6px;
+    background: var(--bg); border: 1px solid var(--border);
+    position: relative;
+  }
+  .preset-tile.preset-saved { border-color: var(--green-border, rgba(34,197,94,.4)); }
+  .preset-tile.preset-partial { border-color: var(--yellow-border, rgba(234,179,8,.4)); }
+  .preset-slot-n { position: absolute; top: 4px; right: 8px; font-size: 10px; color: var(--text-muted); font-family: 'SF Mono', monospace; }
+  .preset-name {
+    background: transparent; border: none; color: var(--text);
+    font-size: 13px; font-weight: 500; padding: 2px 0; width: 100%;
+    outline: none; border-bottom: 1px solid transparent;
+  }
+  .preset-name:hover, .preset-name:focus { border-bottom-color: var(--blue); }
+  .preset-actions { display: flex; gap: 4px; }
+  .preset-btn {
+    flex: 1; padding: 4px 8px; font-size: 11px; cursor: pointer;
+    background: var(--bg-card); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+  }
+  .preset-btn:hover:not(:disabled) { background: var(--bg-card-hover); border-color: var(--blue); }
+  .preset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .preset-btn-recall { color: var(--green); }
+  .preset-btn-save { flex: 0 0 auto; }
   .studio-session-bar.live {
     background: rgba(239,68,68,0.08);
     border-color: var(--red-border);
@@ -1208,10 +1243,113 @@ function renderRoomDetail(roomId) {
       </span>
     </div>
     ${room.type === 'studio' ? renderStudioSessionBar(room) : ''}
+    ${room.devices.some(d => d.type === 'camera') ? `<div id="preset-panel-${room.id}"></div>` : ''}
     <div class="device-grid">
       ${room.devices.map(d => renderDeviceCard(d)).join('')}
     </div>
   `;
+  // Presets render after the grid so the camera slots above are already in the DOM
+  // for positional reference. Loaded async from the backend.
+  if (room.devices.some(d => d.type === 'camera')) loadAndRenderPresets(room.id);
+}
+
+// ── Multi-cam presets ─────────────────────────────────────
+const presetState = new Map(); // roomId → { cameras, presets }
+
+async function loadAndRenderPresets(roomId) {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/presets/${roomId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    presetState.set(roomId, data);
+    renderPresetPanel(roomId);
+  } catch (err) {
+    console.warn('failed to load presets', err);
+  }
+}
+
+function renderPresetPanel(roomId) {
+  const host = document.getElementById(`preset-panel-${roomId}`);
+  if (!host) return;
+  const data = presetState.get(roomId);
+  if (!data) return;
+  const camCount = data.cameras.length;
+  host.innerHTML = `
+    <div class="preset-panel">
+      <div class="preset-panel-header">
+        <span class="preset-panel-title">&#9680; Multi-Cam Presets</span>
+        <span class="preset-panel-sub">Click to recall · double-click name to rename · &#128190; to save current positions (${camCount} cam${camCount === 1 ? '' : 's'})</span>
+      </div>
+      <div class="preset-grid">
+        ${data.presets.map((p) => {
+          const saved = Object.keys(p.positions || {}).length;
+          const savedCls = saved === camCount && camCount > 0 ? 'preset-saved' : saved > 0 ? 'preset-partial' : 'preset-empty';
+          return `
+            <div class="preset-tile ${savedCls}">
+              <div class="preset-slot-n">${p.slot}</div>
+              <input class="preset-name" value="${escapeAttr(p.name)}" data-roomid="${roomId}" data-slot="${p.slot}"
+                     onblur="savePresetName(this)" onkeydown="if(event.key==='Enter')this.blur()">
+              <div class="preset-actions">
+                <button class="preset-btn preset-btn-recall" onclick="recallPreset('${roomId}', ${p.slot})" title="Move all cameras to this preset" ${saved ? '' : 'disabled'}>&#9658; Recall</button>
+                <button class="preset-btn preset-btn-save" onclick="capturePreset('${roomId}', ${p.slot})" title="Save current camera positions">&#128190;</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function escapeAttr(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+async function savePresetName(inputEl) {
+  const roomId = inputEl.dataset.roomid;
+  const slot = Number(inputEl.dataset.slot);
+  const name = inputEl.value.trim() || `Preset ${slot}`;
+  const res = await fetch(`${BACKEND_URL}/api/presets/${roomId}/${slot}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    showToast(`✗ rename preset ${slot}: ${res.status}`, 'error');
+  }
+  // Refresh local state so re-renders show the new name.
+  const data = presetState.get(roomId);
+  if (data) {
+    const p = data.presets.find((x) => x.slot === slot);
+    if (p) p.name = name;
+  }
+}
+
+async function capturePreset(roomId, slot) {
+  showToast(`Capturing positions for preset ${slot}...`, 'info');
+  const res = await fetch(`${BACKEND_URL}/api/presets/${roomId}/${slot}/capture`, { method: 'POST' });
+  if (!res.ok) {
+    showToast(`✗ capture: ${res.status}`, 'error');
+    return;
+  }
+  await loadAndRenderPresets(roomId);
+  showToast(`✓ Preset ${slot} saved`, 'info');
+}
+
+async function recallPreset(roomId, slot) {
+  const res = await fetch(`${BACKEND_URL}/api/presets/${roomId}/${slot}/recall`, { method: 'POST' });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    showToast(`✗ recall: ${res.status} ${txt.slice(0,120)}`, 'error');
+    return;
+  }
+  const data = await res.json();
+  const errs = (data.results || []).filter((r) => r.error);
+  if (errs.length) {
+    showToast(`⚠ Recall partial: ${errs.length} cam(s) failed`, 'error');
+  } else {
+    showToast(`✓ Recalled "${data.preset}"`, 'info');
+  }
 }
 
 function getStudioSession(room) {
@@ -1329,17 +1467,7 @@ function renderCameraBody(device) {
         </div>
       ` : ''}
       ${isOnline
-        ? `<img class="cam-preview" data-deviceid="${device.id}" alt="Live preview" style="width:100%; height:100%; object-fit:cover; display:block; background:#000;"
-             src="${BACKEND_URL}/api/canon/${device.id}/mjpeg"
-             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
-             onload="this.style.display='block'; this.nextElementSibling.style.display='none';">
-           <div class="camera-feed-placeholder" style="display:none;">
-             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-               <rect x="2" y="5" width="15" height="14" rx="2"/>
-               <polygon points="22,7 17,12 22,17"/>
-             </svg>
-             <span>Preview unavailable — camera may be in standby</span>
-           </div>`
+        ? `<div class="cam-preview-slot" data-deviceid="${device.id}" style="width:100%; height:100%; background:#000; position:relative;"></div>`
         : `<div class="camera-feed-placeholder">
              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                <rect x="2" y="5" width="15" height="14" rx="2"/>
@@ -1830,14 +1958,76 @@ function goBack() {
 //  RENDER ORCHESTRATOR
 // ══════════════════════════════════════════════
 
-function render() {
-  renderSidebar();
-  renderBanner();
-  if (state.currentView === 'room' && state.currentRoomId) {
-    renderRoomDetail(state.currentRoomId);
-  } else {
-    renderDashboard();
+// Persistent <img> cache for MJPEG streams. The render() pipeline rewrites
+// innerHTML, which would otherwise tear down the MJPEG <img> every time a
+// device:update arrives — causing visible flicker every few seconds.
+// We keep one <img> element per device id here and move it via appendChild
+// (not clone) into whichever .cam-preview-slot is currently rendered. Moving
+// a DOM node doesn't trigger a reload, so the MJPEG connection stays alive.
+const camImgCache = new Map();
+
+function attachPersistentCamImgs() {
+  document.querySelectorAll('.cam-preview-slot').forEach((slot) => {
+    const id = slot.dataset.deviceid;
+    if (!id) return;
+    let img = camImgCache.get(id);
+    if (!img) {
+      img = document.createElement('img');
+      img.className = 'cam-preview';
+      img.alt = 'Live preview';
+      img.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#000;';
+      img.src = `${BACKEND_URL}/api/canon/${id}/mjpeg`;
+      img.onerror = () => {
+        img.style.display = 'none';
+        const ph = img.nextElementSibling;
+        if (ph) ph.style.display = 'flex';
+      };
+      img.onload = () => {
+        img.style.display = 'block';
+        const ph = img.nextElementSibling;
+        if (ph) ph.style.display = 'none';
+      };
+      camImgCache.set(id, img);
+    }
+    // Placeholder shown while the stream is connecting or failed.
+    let ph = slot.querySelector('.camera-feed-placeholder');
+    if (!ph) {
+      ph = document.createElement('div');
+      ph.className = 'camera-feed-placeholder';
+      ph.style.display = 'none';
+      ph.innerHTML = '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="15" height="14" rx="2"/><polygon points="22,7 17,12 22,17"/></svg><span>Preview unavailable — camera may be in standby</span>';
+    }
+    if (img.parentElement !== slot) slot.appendChild(img);
+    if (ph.parentElement !== slot) slot.appendChild(ph);
+  });
+  // Clean up cached imgs for rooms not currently rendered (frees Canon session slots).
+  const visible = new Set([...document.querySelectorAll('.cam-preview-slot')].map((s) => s.dataset.deviceid));
+  for (const [id, img] of camImgCache) {
+    if (!visible.has(id)) {
+      img.src = '';
+      img.remove();
+      camImgCache.delete(id);
+    }
   }
+}
+
+let renderScheduled = false;
+function render() {
+  // Coalesce multiple render calls within the same tick — 5s poll bursts 7
+  // device:updates which would otherwise call render() 7x in a row.
+  if (renderScheduled) return;
+  renderScheduled = true;
+  queueMicrotask(() => {
+    renderScheduled = false;
+    renderSidebar();
+    renderBanner();
+    if (state.currentView === 'room' && state.currentRoomId) {
+      renderRoomDetail(state.currentRoomId);
+    } else {
+      renderDashboard();
+    }
+    attachPersistentCamImgs();
+  });
 }
 
 // ══════════════════════════════════════════════

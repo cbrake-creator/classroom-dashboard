@@ -21,6 +21,7 @@ import canonRouter from './routes/canon.js';
 import dawRouter from './routes/daw.js';
 import macRouter from './routes/mac.js';
 import pearlRouter from './routes/pearl.js';
+import presetsRouter from './routes/presets.js';
 import roomsRouter from './routes/rooms.js';
 import studioRouter from './routes/studio.js';
 import { startPolling, stopPolling } from './services/deviceManager.js';
@@ -55,6 +56,7 @@ app.use('/api/canon', canonRouter);
 app.use('/api/mac', macRouter);
 app.use('/api/studio', studioRouter);
 app.use('/api/daw', dawRouter);
+app.use('/api/presets', presetsRouter);
 
 // Health probe — handy for systemd / nginx
 app.get('/healthz', (_req, res) => {
