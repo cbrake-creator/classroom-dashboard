@@ -1227,7 +1227,7 @@ function renderRoomCard(room) {
 //  RENDER: ROOM DETAIL (Level 2)
 // ══════════════════════════════════════════════
 
-function renderRoomDetail(roomId) {
+function renderRoomDetail(roomId, viewChanged) {
   const campus = CONFIG.campuses.find(c => c.id === state.activeCampusId);
   const room = campus.rooms.find(r => r.id === roomId);
   if (!room) return;
@@ -1248,9 +1248,15 @@ function renderRoomDetail(roomId) {
       ${room.devices.map(d => renderDeviceCard(d)).join('')}
     </div>
   `;
-  // Presets render after the grid so the camera slots above are already in the DOM
-  // for positional reference. Loaded async from the backend.
-  if (room.devices.some(d => d.type === 'camera')) loadAndRenderPresets(room.id);
+  // Presets: fetch once per room entry. If we have cached state, re-render
+  // from cache; don't re-fetch every time a device update triggers render().
+  if (room.devices.some(d => d.type === 'camera')) {
+    if (presetState.has(room.id)) {
+      renderPresetPanel(room.id);
+    } else if (viewChanged !== false) {
+      loadAndRenderPresets(room.id);
+    }
+  }
 }
 
 // ── Multi-cam presets ─────────────────────────────────────
@@ -2011,23 +2017,27 @@ function attachPersistentCamImgs() {
   }
 }
 
-let renderScheduled = false;
+let renderTimer = null;
+let lastRenderedView = null; // `${view}|${roomId}` — track when the view actually changes
 function render() {
-  // Coalesce multiple render calls within the same tick — 5s poll bursts 7
-  // device:updates which would otherwise call render() 7x in a row.
-  if (renderScheduled) return;
-  renderScheduled = true;
-  queueMicrotask(() => {
-    renderScheduled = false;
+  // Real 80ms debounce. Device updates arrive as separate socket events —
+  // one per device — so without setTimeout debouncing we full-rewrite
+  // mainContent 7x per 5s poll cycle and the page visibly blinks.
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    const viewKey = `${state.currentView}|${state.currentRoomId || ''}`;
+    const viewChanged = viewKey !== lastRenderedView;
+    lastRenderedView = viewKey;
     renderSidebar();
     renderBanner();
     if (state.currentView === 'room' && state.currentRoomId) {
-      renderRoomDetail(state.currentRoomId);
+      renderRoomDetail(state.currentRoomId, viewChanged);
     } else {
       renderDashboard();
     }
     attachPersistentCamImgs();
-  });
+  }, 80);
 }
 
 // ══════════════════════════════════════════════
