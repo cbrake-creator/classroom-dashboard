@@ -31,7 +31,11 @@ export interface CameraDevice extends BaseDevice {
   type: 'camera';
   apiBase: string;
   auth: BasicAuth;
+  // Canon's real Auto Tracking app (RA-AT001) — available when the app is
+  // running + licensed; enabled when tracking is actively on.
   autoTrack: boolean;
+  autoTrackAvailable?: boolean;
+  autoTrackReason?: string;
   panPos: number;
   tiltPos: number;
   zoomPos: number;

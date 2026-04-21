@@ -29,6 +29,7 @@
 //                  c.1.power is absent during standby)
 // ──────────────────────────────────────────────────────────
 import axios, { AxiosInstance } from 'axios';
+import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -252,7 +253,99 @@ export async function setStandby(host: string, on: boolean): Promise<void> {
   log.info({ host, on }, 'canon standby');
 }
 
+// ─── Auto Tracking app (Canon RA-AT001) ────────────────────
+//
+// Canon Auto Tracking is a licensed ADD-ON APPLICATION that runs on the
+// camera, exposed under `/cgi-addon/Auto_Tracking_RA-AT001/app_ctrl/*.cgi`
+// with HTTP Digest auth (not Basic). The app is pre-installed on every
+// CR-N300 but needs a valid license to start. When running and licensed,
+// it drives pan/tilt/zoom itself to follow a detected subject.
+//
+// This is completely separate from `c.1.focus.auto.track` which is a
+// focus-AF parameter (subject-sharpness follow, not camera-movement
+// follow). The original dashboard button wrote the focus key and silently
+// failed — never moved the camera.
+//
+// Endpoints (see /app_ctrl/get_capability.cgi for the full list):
+//   get_config.cgi   → { trackingEnable: "0"|"1", zoomControlEnable, ... }
+//   update_config.cgi?trackingEnable=N → toggle
+//   track_info.cgi   → live subject-detection + PTZ state (~20 fields)
+//   save_config.cgi  → persist current config across reboots
+
+export interface AutoTrackStatus {
+  available: boolean;      // app is running AND license valid
+  enabled: boolean;        // trackingEnable=1 (tracking is actively on)
+  startupReason?: string;  // when available=false, human-readable why
+}
+
+// Manual Digest auth — axios doesn't ship with it, and Node has no stdlib
+// for it either. Two round-trips: first 401 carries the challenge, second
+// request includes the computed response. Small enough to inline.
+async function digestGet<T = unknown>(host: string, path: string): Promise<T> {
+  const url = `http://${host}${path}`;
+  // Round 1: expect 401 with WWW-Authenticate
+  const first = await axios.get(url, { validateStatus: () => true });
+  if (first.status === 200) return first.data as T;
+  if (first.status !== 401) {
+    throw new Error(`digest: unexpected ${first.status}`);
+  }
+  const auth = String(first.headers['www-authenticate'] ?? '');
+  if (!auth.toLowerCase().startsWith('digest ')) {
+    throw new Error(`digest: no challenge (got ${auth || 'empty'})`);
+  }
+  const parts: Record<string, string> = {};
+  for (const m of auth.slice(7).matchAll(/(\w+)=(?:"([^"]*)"|([^,]+))/g)) {
+    parts[m[1]!] = m[2] ?? m[3] ?? '';
+  }
+  const user = config.canonAuth.username;
+  const pass = config.canonAuth.password;
+  const realm = parts.realm ?? '';
+  const nonce = parts.nonce ?? '';
+  const qop = parts.qop ?? '';
+  const opaque = parts.opaque;
+  const md5 = (s: string) => createHash('md5').update(s).digest('hex');
+  const ha1 = md5(`${user}:${realm}:${pass}`);
+  const ha2 = md5(`GET:${path}`);
+  const nc = '00000001';
+  const cnonce = Math.random().toString(16).slice(2, 10);
+  const response = qop
+    ? md5(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
+    : md5(`${ha1}:${nonce}:${ha2}`);
+  const header =
+    `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", ` +
+    `response="${response}", algorithm=MD5` +
+    (qop ? `, qop=${qop}, nc=${nc}, cnonce="${cnonce}"` : '') +
+    (opaque ? `, opaque="${opaque}"` : '');
+  const second = await axios.get(url, {
+    headers: { Authorization: header },
+    validateStatus: () => true,
+  });
+  if (second.status !== 200) throw new Error(`digest: ${second.status}`);
+  return second.data as T;
+}
+
+export async function getAutoTrackStatus(host: string): Promise<AutoTrackStatus> {
+  try {
+    const cfg = await digestGet<Record<string, unknown>>(
+      host,
+      '/cgi-addon/Auto_Tracking_RA-AT001/app_ctrl/get_config.cgi',
+    );
+    const enabled = String(cfg.trackingEnable ?? '0') === '1';
+    return { available: true, enabled };
+  } catch (err) {
+    const msg = (err as Error).message ?? '';
+    // 409 "application must be started" means app is installed but not
+    // running (unlicensed, or manually stopped).
+    if (msg.includes('409') || /must be started/i.test(msg)) {
+      return { available: false, enabled: false, startupReason: 'not running (license required)' };
+    }
+    return { available: false, enabled: false, startupReason: msg };
+  }
+}
+
+// Legacy: the old setAutoTrack tried to flip a focus-AF key that had
+// nothing to do with camera-follow tracking. Kept as a no-op stub until
+// write support against /app_ctrl/update_config.cgi is wired.
 export async function setAutoTrack(camId: string, host: string, enabled: boolean): Promise<void> {
-  await sendControl(camId, host, 'c.1.focus.auto.track', enabled ? 'on' : 'off');
-  log.info({ camId, enabled }, 'canon autotrack');
+  log.warn({ camId, host, enabled }, 'setAutoTrack: write path not yet wired to /app_ctrl — no-op');
 }

@@ -64,14 +64,22 @@ async function refreshPearl(device: PearlDevice): Promise<Partial<PearlDevice>> 
 }
 
 async function refreshCanon(device: CameraDevice): Promise<Partial<CameraDevice>> {
-  const info = await canon.getInfo(device.ip);
+  // Two independent reads: the XC info.cgi for PTZ + power, and the Auto
+  // Tracking add-on app's get_config.cgi for real subject-follow state.
+  // The latter lives behind HTTP Digest auth at /cgi-addon/Auto_Tracking_RA-AT001.
+  const [info, at] = await Promise.all([
+    canon.getInfo(device.ip),
+    canon.getAutoTrackStatus(device.ip).catch(() => ({ available: false, enabled: false, startupReason: 'probe failed' })),
+  ]);
   return {
     status: 'online',
     power: info.power,
     panPos: info.panPos,
     tiltPos: info.tiltPos,
     zoomPos: info.zoomPos,
-    autoTrack: info.autoTrack,
+    autoTrack: at.enabled,
+    autoTrackAvailable: at.available,
+    autoTrackReason: at.startupReason,
     livescopeStatus: info.livescopeStatus,
     livescopeMsg: info.livescopeMsg,
     lastError: null,

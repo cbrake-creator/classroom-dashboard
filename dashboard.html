@@ -1759,8 +1759,11 @@ function renderCameraBody(device) {
 
     <!-- Camera Actions -->
     <div class="control-row">
-      <button class="ctrl-btn ${device.autoTrack ? 'ctrl-btn-active' : 'ctrl-btn-green'}" onclick="cmd('/api/canon/${device.id}/autotrack', { enabled: ${!device.autoTrack} })" title="POST /api/canon/${device.id}/autotrack">
-        &#9678; Auto-Track ${device.autoTrack ? 'ON' : 'OFF'}
+      <button class="ctrl-btn ${device.autoTrack ? 'ctrl-btn-active' : device.autoTrackAvailable ? 'ctrl-btn-green' : 'ctrl-btn-neutral'}"
+              onclick="cmd('/api/canon/${device.id}/autotrack', { enabled: ${!device.autoTrack} })"
+              ${device.autoTrackAvailable ? '' : 'disabled'}
+              title="${device.autoTrackAvailable ? 'Toggle Canon RA-AT001 Auto Tracking' : 'Unavailable — ' + (device.autoTrackReason || 'app not running or unlicensed')}">
+        &#9678; Auto-Track ${device.autoTrack ? 'ON' : device.autoTrackAvailable ? 'OFF' : 'N/A'}
       </button>
       <button class="ctrl-btn ${powerBtnClass}" onclick="cmd('/api/canon/${device.id}/standby', { on: ${!!device.power} })" title="POST /api/canon/${device.id}/standby">
         &#9211; ${powerLabel}
