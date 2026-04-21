@@ -25,6 +25,7 @@ import presetsRouter from './routes/presets.js';
 import roomsRouter from './routes/rooms.js';
 import studioRouter from './routes/studio.js';
 import { startPolling, stopPolling } from './services/deviceManager.js';
+import * as logitechSync from './devices/logitechSync.js';
 import * as macClient from './devices/mac.js';
 import { initSocketServer } from './ws/socketServer.js';
 import { initSidecarNamespace } from './ws/sidecarServer.js';
@@ -93,12 +94,16 @@ httpServer.listen(config.port, () => {
     'classroom-dashboard backend listening',
   );
   startPolling();
+  // Logitech Sync Cloud poll loop (independent of the device-manager poll
+  // since it has its own rate limit and runs less frequently).
+  logitechSync.startPolling();
 });
 
 // Graceful shutdown
 function shutdown(signal: string): void {
   logger.info({ signal }, 'shutting down');
   stopPolling();
+  logitechSync.stopPolling();
   macClient.disconnect();
   httpServer.close(() => process.exit(0));
   // Hard-exit if close hangs

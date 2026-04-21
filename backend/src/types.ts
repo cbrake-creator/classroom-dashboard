@@ -74,16 +74,23 @@ export interface DisplayDevice extends BaseDevice {
 }
 
 // ─── Logitech room kit ─────────────────────────────────────
+// healthStatus + peripherals come from Logitech Sync Cloud API when the
+// org has a valid Select/Essential/SyncPlus license and a cert is wired.
+// Otherwise they stay undefined and the dashboard falls back to ICMP ping.
 export interface RallyBarDevice extends BaseDevice {
   type: 'rally-bar';
   inCall: boolean;
   firmware: string;
+  healthStatus?: 'NoIssues' | 'Warning' | 'Error';
+  peripherals?: Record<string, { expected: number; actual: number }>;
 }
 export interface TapDevice extends BaseDevice {
   type: 'tap';
+  healthStatus?: 'NoIssues' | 'Warning' | 'Error';
 }
 export interface SightDevice extends BaseDevice {
   type: 'sight';
+  healthStatus?: 'NoIssues' | 'Warning' | 'Error';
 }
 export interface AudioDevice extends BaseDevice {
   type: 'audio';

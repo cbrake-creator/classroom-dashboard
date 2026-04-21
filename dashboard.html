@@ -2176,20 +2176,36 @@ function renderDawBody(device) {
 
 function renderSimpleDeviceBody(device) {
   const metrics = [];
+  const health = device.healthStatus; // populated from Logitech Sync when available
+  const healthCls = health === 'Error' ? 'error' : health === 'Warning' ? 'warn' : health === 'NoIssues' ? 'ok' : '';
+  const healthLabel = health === 'NoIssues' ? 'All Clear' : health || '—';
+
   if (device.type === 'rally-bar') {
-    metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
-    metrics.push({ label: 'In Call', value: device.inCall ? 'Yes' : 'No', cls: device.inCall ? 'warn' : 'ok' });
+    const inCallText = device.inCall ? 'In Meeting' : 'Idle';
+    const statusText = device.status === 'online'
+      ? (device.inCall ? 'Online · In Call' : 'Online · Idle')
+      : 'Offline';
+    const statusCls = device.status !== 'online' ? 'error' : device.inCall ? 'warn' : 'ok';
+    metrics.push({ label: 'Status', value: statusText, cls: statusCls });
+    if (health) metrics.push({ label: 'Sync Health', value: healthLabel, cls: healthCls });
+    metrics.push({ label: 'Use', value: inCallText, cls: device.inCall ? 'warn' : 'ok' });
     metrics.push({ label: 'Firmware', value: device.firmware || '—', cls: 'ok' });
-    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
-  } else if (device.type === 'tap') {
-    metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
-    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
-  } else if (device.type === 'sight') {
-    metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
-    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
+  } else if (device.type === 'tap' || device.type === 'sight') {
+    metrics.push({ label: 'Status', value: device.status === 'online' ? 'Online' : 'Offline', cls: device.status === 'online' ? 'ok' : 'error' });
+    if (health) metrics.push({ label: 'Sync Health', value: healthLabel, cls: healthCls });
   } else if (device.type === 'audio') {
     metrics.push({ label: 'Power', value: device.power ? 'On' : 'Off', cls: device.power ? 'ok' : 'error' });
     metrics.push({ label: 'Status', value: device.status === 'online' ? 'Reachable' : 'Unreachable', cls: device.status === 'online' ? 'ok' : 'error' });
+  }
+
+  // Peripheral mismatch (Rally Bar only) — "expected 2 mic pods, found 1"
+  const peripheralAlerts = [];
+  if (device.peripherals) {
+    for (const [name, pc] of Object.entries(device.peripherals)) {
+      if (pc.expected !== pc.actual) {
+        peripheralAlerts.push(`${name}: ${pc.actual}/${pc.expected}`);
+      }
+    }
   }
 
   return `
@@ -2201,11 +2217,11 @@ function renderSimpleDeviceBody(device) {
         </div>
       `).join('')}
     </div>
-    <div class="control-row">
-      <button class="ctrl-btn ${device.power ? 'ctrl-btn-red' : 'ctrl-btn-green'}">
-        &#9211; Power ${device.power ? 'Off' : 'On'}
-      </button>
-    </div>
+    ${peripheralAlerts.length > 0 ? `
+      <div class="device-note" style="color: var(--yellow, #eab308);">
+        ⚠ Peripheral mismatch: ${peripheralAlerts.join(' · ')}
+      </div>
+    ` : ''}
   `;
 }
 

@@ -25,6 +25,7 @@ import * as pearl from '../devices/pearl.js';
 import * as canon from '../devices/canon.js';
 import * as mac from '../devices/mac.js';
 import * as rodecaster from '../devices/rodecaster.js';
+import * as sync from '../devices/logitechSync.js';
 import { ping } from '../devices/pinger.js';
 import { getDevice, getState, patchDevice } from './roomState.js';
 import { broadcastDeviceUpdate, broadcastDeviceError } from '../ws/socketServer.js';
@@ -127,21 +128,61 @@ async function refreshDevice(device: Device): Promise<Partial<Device> | null> {
     case 'rodecaster':
       return refreshRodecaster(device);
     case 'rally-bar':
+      return refreshRallyBar(device);
+    case 'tap':
+    case 'sight':
+      return refreshLogitechPeripheral(device);
     case 'nuc':
     case 'display':
     case 'network-switch':
     case 'audio':
       return refreshViaPing(device);
-    case 'tap':
-    case 'sight':
-      // Chain off the Rally Bar's ping — they don't have IPs of their own.
-      // For now, surface them as unknown; a later pass can mirror the
-      // Rally Bar's status (USB peripherals, so if Rally Bar is up they
-      // almost certainly are too).
-      return null;
     default:
       return null;
   }
+}
+
+// Rally Bar: prefer Sync Cloud API (authoritative real-time data), fall
+// back to ping. Sync tells us 'InUse' (in a Teams/Zoom call), healthStatus,
+// peripheral expected-vs-actual, and firmware — none of which ping can.
+async function refreshRallyBar(device: Device & { ip: string }): Promise<Partial<Device>> {
+  const live = sync.findByIp(device.ip);
+  if (live) {
+    const inCall = live.status === 'InUse';
+    const onlineLike = live.status === 'Online' || live.status === 'InUse';
+    return {
+      status: onlineLike ? 'online' : 'offline',
+      inCall,
+      firmware: live.firmware ?? undefined,
+      healthStatus: live.health,
+      peripherals: live.peripherals ?? undefined,
+      lastError: live.health === 'Error' ? 'Logitech Sync flagged Error' : null,
+    } as Partial<Device>;
+  }
+  // Not in Sync (maybe unlicensed or just not yet populated) — ping.
+  return refreshViaPing(device);
+}
+
+// Tap / Sight are USB-chained to a Rally Bar so they have no IP. Sync still
+// reports them as separate devices under the same room — match by serial.
+async function refreshLogitechPeripheral(device: Device & { ip: string }): Promise<Partial<Device>> {
+  // device.ip is "via 10.56.1.xxx" — a pointer to the Rally Bar that hosts them.
+  // Sync has them indexed by serial only. Without serial in our fixture, just
+  // mirror the Rally Bar's status: if the Rally Bar is up, the peripheral is
+  // almost certainly plugged in. If Rally Bar is down, the peripheral is dark.
+  const ipMatch = device.ip.match(/(\d+\.\d+\.\d+\.\d+)/);
+  if (!ipMatch) return { status: 'unknown' } as Partial<Device>;
+  const rallyLive = sync.findByIp(ipMatch[1]!);
+  if (rallyLive) {
+    const onlineLike = rallyLive.status === 'Online' || rallyLive.status === 'InUse';
+    return {
+      status: onlineLike ? 'online' : 'offline',
+      healthStatus: rallyLive.health,
+    } as Partial<Device>;
+  }
+  // Rally Bar isn't in Sync — ping it as a proxy for the peripheral.
+  const r = await ping(ipMatch[1]!, 1000);
+  return { status: r.reachable ? 'online' : 'offline' } as Partial<Device>;
 }
 
 // Ping-only refresh: for devices where we have no vendor API wired yet,

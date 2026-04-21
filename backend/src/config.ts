@@ -90,6 +90,14 @@ export const config = {
   // Shared secret the studio-Mac DAW sidecar presents on connect.
   // Empty string disables auth (dev convenience; set in production .env).
   sidecarToken: envOptional('SIDECAR_TOKEN') ?? '',
+
+  sync: {
+    orgId: envOptional('SYNC_ORG_ID') ?? '',
+    // Relative paths resolve from the backend cwd (where `npm run dev` runs).
+    certPath: envOptional('SYNC_CERT_PATH') ?? './certs/certificate.pem',
+    keyPath: envOptional('SYNC_KEY_PATH') ?? './certs/privateKey.pem',
+    pollIntervalMs: envNumber('SYNC_POLL_INTERVAL_MS', 60000),
+  },
 };
 
 export type AppConfig = typeof config;
