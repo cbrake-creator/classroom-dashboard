@@ -145,11 +145,23 @@ async function refreshDevice(device: Device): Promise<Partial<Device> | null> {
 }
 
 // Ping-only refresh: for devices where we have no vendor API wired yet,
-// online/offline + latency is still useful signal. Works against any device
-// with an IP that responds to ICMP.
+// online/offline + latency is still useful signal.
 async function refreshViaPing(device: Device & { ip: string }): Promise<Partial<Device>> {
-  // Skip virtual IPs like "via 10.56.1.238" or "via mac-1 USB".
+  // Skip virtual IPs ("via 10.56.1.238" = USB-chained peripheral; "via mac-1 USB"
+  // = detected over SSH from the host Mac). Those don't have their own IP.
   if (!device.ip || device.ip.startsWith('via ')) return { status: device.status };
+
+  // Skip legacy placeholder IPs from the old fixture (10.1.*.*, 10.2.*.*, etc.
+  // when dashboard was mock-only). Pinging them in live mode would always fail
+  // and mislead the user into thinking the device is offline when really we
+  // just don't have a real IP yet. Mark as 'unknown' with a helpful hint.
+  if (!/^10\.56\./.test(device.ip)) {
+    return {
+      status: 'unknown',
+      lastError: 'IP not wired to real device yet (placeholder from legacy fixture)',
+    } as Partial<Device>;
+  }
+
   const r = await ping(device.ip, 1000);
   return {
     status: r.reachable ? 'online' : 'offline',
