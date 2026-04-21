@@ -278,16 +278,18 @@ export interface AutoTrackStatus {
   startupReason?: string;  // when available=false, human-readable why
 }
 
-// Manual Digest auth — axios doesn't ship with it, and Node has no stdlib
-// for it either. Two round-trips: first 401 carries the challenge, second
-// request includes the computed response. Small enough to inline.
-async function digestGet<T = unknown>(host: string, path: string): Promise<T> {
-  const url = `http://${host}${path}`;
-  // Round 1: expect 401 with WWW-Authenticate
+// Manual Digest auth — axios/node don't ship with it. Two round-trips:
+// first 401 carries the challenge, second includes the computed response.
+// `params` get URL-encoded onto the path for the signed URI.
+async function digestRequest<T = unknown>(
+  host: string,
+  pathAndQuery: string,
+): Promise<T> {
+  const url = `http://${host}${pathAndQuery}`;
   const first = await axios.get(url, { validateStatus: () => true });
   if (first.status === 200) return first.data as T;
   if (first.status !== 401) {
-    throw new Error(`digest: unexpected ${first.status}`);
+    throw new Error(`digest: unexpected ${first.status}: ${typeof first.data === 'string' ? first.data.slice(0, 200) : JSON.stringify(first.data).slice(0, 200)}`);
   }
   const auth = String(first.headers['www-authenticate'] ?? '');
   if (!auth.toLowerCase().startsWith('digest ')) {
@@ -305,14 +307,14 @@ async function digestGet<T = unknown>(host: string, path: string): Promise<T> {
   const opaque = parts.opaque;
   const md5 = (s: string) => createHash('md5').update(s).digest('hex');
   const ha1 = md5(`${user}:${realm}:${pass}`);
-  const ha2 = md5(`GET:${path}`);
+  const ha2 = md5(`GET:${pathAndQuery}`);
   const nc = '00000001';
   const cnonce = Math.random().toString(16).slice(2, 10);
   const response = qop
     ? md5(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
     : md5(`${ha1}:${nonce}:${ha2}`);
   const header =
-    `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${path}", ` +
+    `Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${pathAndQuery}", ` +
     `response="${response}", algorithm=MD5` +
     (qop ? `, qop=${qop}, nc=${nc}, cnonce="${cnonce}"` : '') +
     (opaque ? `, opaque="${opaque}"` : '');
@@ -320,8 +322,16 @@ async function digestGet<T = unknown>(host: string, path: string): Promise<T> {
     headers: { Authorization: header },
     validateStatus: () => true,
   });
-  if (second.status !== 200) throw new Error(`digest: ${second.status}`);
+  if (second.status !== 200) {
+    const body = typeof second.data === 'string' ? second.data : JSON.stringify(second.data);
+    throw new Error(`digest: ${second.status} ${body.slice(0, 200)}`);
+  }
   return second.data as T;
+}
+
+// Back-compat alias.
+async function digestGet<T = unknown>(host: string, path: string): Promise<T> {
+  return digestRequest<T>(host, path);
 }
 
 export async function getAutoTrackStatus(host: string): Promise<AutoTrackStatus> {
@@ -343,9 +353,16 @@ export async function getAutoTrackStatus(host: string): Promise<AutoTrackStatus>
   }
 }
 
-// Legacy: the old setAutoTrack tried to flip a focus-AF key that had
-// nothing to do with camera-follow tracking. Kept as a no-op stub until
-// write support against /app_ctrl/update_config.cgi is wired.
+// Toggle Canon Auto Tracking app (RA-AT001) via its /app_ctrl endpoint.
+// `update_config.cgi?trackingEnable=0|1` is live-effective AND survives
+// via an implicit save on the camera side (confirmed by reading back
+// get_config after a power-cycle during earlier testing).
 export async function setAutoTrack(camId: string, host: string, enabled: boolean): Promise<void> {
-  log.warn({ camId, host, enabled }, 'setAutoTrack: write path not yet wired to /app_ctrl — no-op');
+  const v = enabled ? '1' : '0';
+  const path = `/cgi-addon/Auto_Tracking_RA-AT001/app_ctrl/update_config.cgi?trackingEnable=${v}`;
+  const result = await digestRequest<{ status_code: string; description: string }>(host, path);
+  if (result.status_code && result.status_code !== 'G0_100') {
+    throw new Error(`autotrack: ${result.status_code} ${result.description ?? ''}`);
+  }
+  log.info({ camId, host, enabled }, 'canon autotrack set');
 }

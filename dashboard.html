@@ -399,6 +399,12 @@
     font-size: 11px;
     color: var(--text-muted);
   }
+  .device-ip-link {
+    color: var(--blue);
+    text-decoration: none;
+    border-bottom: 1px dotted transparent;
+  }
+  .device-ip-link:hover { border-bottom-color: var(--blue); }
   .device-status-badge {
     font-size: 11px;
     font-weight: 600;
@@ -1619,6 +1625,19 @@ function renderStudioSessionBar(room) {
   `;
 }
 
+// Turn an IP into a clickable link to the device's own web UI when we know
+// one exists. Canon CR-N300 and Epiphan Pearl 2 both serve their admin UI
+// on port 80; other device types either have no web UI or live behind VPN
+// creds we don't control, so those stay as plain text.
+function renderDeviceIpLink(device) {
+  const ip = device.ip;
+  if (!ip || ip.includes('via ')) return ip; // skip things like "via mac-1 USB"
+  const hasWebUi = device.type === 'camera' || device.type === 'pearl';
+  if (!hasWebUi) return ip;
+  const url = device.type === 'camera' ? `http://${ip}/` : `http://${ip}/`;
+  return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="device-ip-link" title="Open ${deviceTypeName(device.type)} admin UI in new tab">${ip} &#8599;</a>`;
+}
+
 function renderDeviceCard(device) {
   const issues = getDeviceIssues(device);
   const statusColor = issues.length > 0 ? 'red' : 'green';
@@ -1654,7 +1673,7 @@ function renderDeviceCard(device) {
           <div class="device-icon">${deviceIcon(device.type)}</div>
           <div>
             <div class="device-name">${device.label ? device.label + ' — ' : deviceTypeName(device.type) + ' — '}${device.brand}</div>
-            <div class="device-model">${device.model || ''} &middot; ${device.ip}</div>
+            <div class="device-model">${device.model || ''} &middot; ${renderDeviceIpLink(device)}</div>
           </div>
         </div>
         <span class="device-status-badge ${badgeClass}">${statusText}</span>
