@@ -139,6 +139,25 @@ export function findByMac(mac: string): SyncDeviceLive | undefined {
   return getCached().find((d) => d.mac === lower);
 }
 
+// Taps and Sights are USB-chained to a Rally Bar; Sync still lists them as
+// their own device rows with their own healthStatus. Given a Rally Bar IP
+// and a device name ("Tap", "Sight"), find the matching peripheral in the
+// same Sync room.
+export function findPeripheralByRallyBarIp(
+  rallyBarIp: string,
+  deviceName: 'Tap' | 'Sight',
+): SyncDeviceLive | undefined {
+  const all = getCached();
+  const rally = all.find((d) => d.ip === rallyBarIp);
+  if (!rally) return undefined;
+  return all.find(
+    (d) =>
+      d.roomName === rally.roomName &&
+      d.deviceType === 'Logitech' &&
+      (d.name === deviceName || d.name === `${deviceName} IP`),
+  );
+}
+
 // Periodic refresh loop — kicks off once when the server boots.
 let pollHandle: NodeJS.Timeout | null = null;
 export function startPolling(): void {

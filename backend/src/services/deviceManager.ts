@@ -163,25 +163,33 @@ async function refreshRallyBar(device: Device & { ip: string }): Promise<Partial
   return refreshViaPing(device);
 }
 
-// Tap / Sight are USB-chained to a Rally Bar so they have no IP. Sync still
-// reports them as separate devices under the same room — match by serial.
-async function refreshLogitechPeripheral(device: Device & { ip: string }): Promise<Partial<Device>> {
-  // device.ip is "via 10.56.1.xxx" — a pointer to the Rally Bar that hosts them.
-  // Sync has them indexed by serial only. Without serial in our fixture, just
-  // mirror the Rally Bar's status: if the Rally Bar is up, the peripheral is
-  // almost certainly plugged in. If Rally Bar is down, the peripheral is dark.
+// Tap / Sight are USB-chained to a Rally Bar so they have no IP, but Sync
+// tracks them as independent device rows with their OWN healthStatus.
+// Match the peripheral to its room via the hosting Rally Bar's IP and
+// surface Sync's per-peripheral health flag — not the Rally Bar's.
+async function refreshLogitechPeripheral(device: Device & { ip: string; type: 'tap' | 'sight' }): Promise<Partial<Device>> {
   const ipMatch = device.ip.match(/(\d+\.\d+\.\d+\.\d+)/);
   if (!ipMatch) return { status: 'unknown' } as Partial<Device>;
-  const rallyLive = sync.findByIp(ipMatch[1]!);
-  if (rallyLive) {
-    const onlineLike = rallyLive.status === 'Online' || rallyLive.status === 'InUse';
+  const rallyBarIp = ipMatch[1]!;
+  const deviceName = device.type === 'tap' ? 'Tap' : 'Sight';
+  const peripheralLive = sync.findPeripheralByRallyBarIp(rallyBarIp, deviceName);
+  if (peripheralLive) {
+    const onlineLike = peripheralLive.status === 'Online' || peripheralLive.status === 'InUse';
     return {
       status: onlineLike ? 'online' : 'offline',
-      healthStatus: rallyLive.health,
+      healthStatus: peripheralLive.health,
+      firmware: peripheralLive.firmware ?? undefined,
+      lastError: peripheralLive.health === 'Error' ? 'Sync flagged Error — check portal' : null,
     } as Partial<Device>;
   }
-  // Rally Bar isn't in Sync — ping it as a proxy for the peripheral.
-  const r = await ping(ipMatch[1]!, 1000);
+  // Peripheral isn't in Sync (or Rally Bar missing from Sync) — ping the
+  // Rally Bar as a health-by-proxy fallback.
+  const rallyLive = sync.findByIp(rallyBarIp);
+  if (rallyLive) {
+    const onlineLike = rallyLive.status === 'Online' || rallyLive.status === 'InUse';
+    return { status: onlineLike ? 'online' : 'offline' } as Partial<Device>;
+  }
+  const r = await ping(rallyBarIp, 1000);
   return { status: r.reachable ? 'online' : 'offline' } as Partial<Device>;
 }
 
