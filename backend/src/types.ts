@@ -24,6 +24,9 @@ export interface BaseDevice {
   label?: string;
   lastSeen?: number;
   lastError?: string | null;
+  // ICMP ping round-trip latency from the dashboard host, when the device's
+  // refresh path is ping-based (Rally Bars, NUCs, displays, switches, audio).
+  latencyMs?: number;
 }
 
 // ─── Camera (Canon CR-N300, XC HTTP CGI) ───────────────────

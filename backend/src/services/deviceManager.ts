@@ -25,6 +25,7 @@ import * as pearl from '../devices/pearl.js';
 import * as canon from '../devices/canon.js';
 import * as mac from '../devices/mac.js';
 import * as rodecaster from '../devices/rodecaster.js';
+import { ping } from '../devices/pinger.js';
 import { getDevice, getState, patchDevice } from './roomState.js';
 import { broadcastDeviceUpdate, broadcastDeviceError } from '../ws/socketServer.js';
 
@@ -125,12 +126,36 @@ async function refreshDevice(device: Device): Promise<Partial<Device> | null> {
       return refreshMac(device);
     case 'rodecaster':
       return refreshRodecaster(device);
-    // The Logitech / NUC / display / switch types don't have real clients
-    // wired up yet — they'll come from SNMP / vendor APIs in a later pass.
-    // Until then we leave them as the fixture data so the UI keeps rendering.
+    case 'rally-bar':
+    case 'nuc':
+    case 'display':
+    case 'network-switch':
+    case 'audio':
+      return refreshViaPing(device);
+    case 'tap':
+    case 'sight':
+      // Chain off the Rally Bar's ping — they don't have IPs of their own.
+      // For now, surface them as unknown; a later pass can mirror the
+      // Rally Bar's status (USB peripherals, so if Rally Bar is up they
+      // almost certainly are too).
+      return null;
     default:
       return null;
   }
+}
+
+// Ping-only refresh: for devices where we have no vendor API wired yet,
+// online/offline + latency is still useful signal. Works against any device
+// with an IP that responds to ICMP.
+async function refreshViaPing(device: Device & { ip: string }): Promise<Partial<Device>> {
+  // Skip virtual IPs like "via 10.56.1.238" or "via mac-1 USB".
+  if (!device.ip || device.ip.startsWith('via ')) return { status: device.status };
+  const r = await ping(device.ip, 1000);
+  return {
+    status: r.reachable ? 'online' : 'offline',
+    latencyMs: r.latencyMs ?? undefined,
+    lastError: r.reachable ? null : (r.error ?? 'unreachable'),
+  } as Partial<Device>;
 }
 
 // Compose a globally-unique failure-count key. Device IDs like `cam-1`,

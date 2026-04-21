@@ -200,22 +200,31 @@ function makeHybridClassroom(id: string, name: string, subnet: number, tvCount: 
   return { id, name, type: 'classroom', devices: makeHybridClassroomDevices(subnet, tvCount) };
 }
 
-function makeConference(id: string, name: string, subnet: number, override?: (r: Room) => void): Room {
+function makeConference(
+  id: string,
+  name: string,
+  subnet: number,
+  override?: (r: Room) => void,
+  opts?: { rallyBarIp?: string; rallyBarMini?: boolean; firmware?: string },
+): Room {
   const base = `10.1.${subnet}`;
+  const rbIp = opts?.rallyBarIp ?? `${base}.100`;
   const devices: Array<RallyBarDevice | TapDevice | SightDevice> = [
     {
       id: 'rally-bar-1',
       type: 'rally-bar',
       brand: 'Logitech',
-      model: 'Rally Bar',
-      ip: `${base}.100`,
+      model: opts?.rallyBarMini ? 'Rally Bar Mini' : 'Rally Bar',
+      ip: rbIp,
       status: 'online',
       power: true,
       inCall: false,
-      firmware: '1.12.150',
+      firmware: opts?.firmware ?? '—',
     },
-    { id: 'tap-1', type: 'tap', brand: 'Logitech', model: 'Tap', ip: `${base}.101`, status: 'online', power: true },
-    { id: 'sight-1', type: 'sight', brand: 'Logitech', model: 'Sight Triple', ip: `${base}.102`, status: 'online', power: true },
+    // Tap + Sight don't have IPs — they chain off the Rally Bar via USB.
+    // Their reachability rides on the Rally Bar's ping.
+    { id: 'tap-1', type: 'tap', brand: 'Logitech', model: 'Tap', ip: `via ${rbIp}`, status: 'online', power: true },
+    { id: 'sight-1', type: 'sight', brand: 'Logitech', model: 'Sight', ip: `via ${rbIp}`, status: 'online', power: true },
   ];
   const room: Room = { id, name, type: 'conference', devices };
   if (override) override(room);
@@ -412,20 +421,20 @@ export function buildInitialState(): DashboardState {
       makeClassroom('todd-320', 'Todd 320', 16, 4, '10.56.1.224'),
       makeHybridClassroom('wsc-333', 'WSC 333', 36, 4),
       makeHybridClassroom('wsc-334', 'WSC 334', 37, 4),
-      // Conference rooms
-      makeConference('mosher-109', 'Mosher 109', 20),
-      makeConference('mosher-110', 'Mosher 110', 21),
-      makeConference('mosher-204', 'Mosher 204', 22),
-      makeConference('mosher-205', 'Mosher 205', 23, (r) => {
-        const sight = r.devices[2] as SightDevice;
-        sight.status = 'offline';
-        sight.power = false;
-      }),
-      makeConference('stearns-208', 'Stearns 208', 24),
-      makeConference('stearns-003', 'Stearns 003', 25),
-      makeConference('wsc-108h', 'WSC 108h', 26),
-      makeConference('wsc-206', 'WSC 206', 27),
-      makeConference('horner-204', 'Horner 204', 28),
+      // Conference rooms — Rally Bar IPs sourced from Logitech Sync CSV export
+      // (Device_export_2026-04-21). Firmware versions from same export.
+      makeConference('bailey-101a', 'Bailey 101a', 38, undefined, { rallyBarIp: '10.56.1.238', firmware: '2.0.105' }),
+      makeConference('bailey-101b', 'Bailey 101b', 39, undefined, { rallyBarIp: '10.56.1.194' }),
+      makeConference('mosher-109', 'Mosher 109', 20, undefined, { rallyBarIp: '10.56.1.207' }),
+      makeConference('mosher-110', 'Mosher 110', 21, undefined, { rallyBarIp: '10.56.1.221' }),
+      makeConference('mosher-204', 'Mosher 204', 22, undefined, { rallyBarIp: '10.56.1.217' }),
+      makeConference('mosher-205', 'Mosher 205', 23, undefined, { rallyBarIp: '10.56.1.220' }),
+      makeConference('stearns-208', 'Stearns 208', 24, undefined, { rallyBarIp: '10.56.24.201', rallyBarMini: true }),
+      makeConference('stearns-003', 'Stearns 003', 25, undefined, { rallyBarIp: '10.56.24.206', rallyBarMini: true }),
+      makeConference('stearns-206', 'Stearns 206', 40, undefined, { rallyBarIp: '10.56.24.199', rallyBarMini: true }),
+      makeConference('wsc-108h', 'WSC 108h', 26, undefined, { rallyBarIp: '10.56.24.195', rallyBarMini: true }),
+      makeConference('wsc-206', 'WSC 206', 27, undefined, { rallyBarIp: '10.56.1.201' }),
+      makeConference('horner-204', 'Horner 204', 28, undefined, { rallyBarIp: '10.56.1.182' }),
       makeConference('horner-304', 'Horner 304', 29, (r) => {
         r.devices.push(
           {
@@ -449,9 +458,9 @@ export function buildInitialState(): DashboardState {
             power: true,
           },
         );
-      }),
-      makeConference('mitchell-109e', 'Mitchell 109E', 30),
-      makeConference('hendricks-207', 'Hendricks 207 (Seay Library)', 31),
+      }, { rallyBarIp: '10.56.1.247' }),
+      makeConference('mitchell-109e', 'Mitchell 109E', 30, undefined, { rallyBarIp: '10.56.24.211', rallyBarMini: true }),
+      makeConference('hendricks-207', 'Hendricks 207 (Seay Library)', 31, undefined, { rallyBarIp: '10.56.1.187' }),
       // Studios
       makeFacultyPodcastStudio(),
       makeTechTalksStudio(),
