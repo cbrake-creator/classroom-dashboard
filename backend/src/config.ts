@@ -98,6 +98,13 @@ export const config = {
     keyPath: envOptional('SYNC_KEY_PATH') ?? './certs/privateKey.pem',
     pollIntervalMs: envNumber('SYNC_POLL_INTERVAL_MS', 60000),
   },
+
+  // Rally Bar local CollabOS admin API — shared credentials across all
+  // devices where Local Network Access has been enabled via Sync Portal.
+  logitechLocal: {
+    username: envOptional('LOGI_LOCAL_USERNAME') ?? '',
+    password: envOptional('LOGI_LOCAL_PASSWORD') ?? '',
+  },
 };
 
 export type AppConfig = typeof config;

@@ -2181,14 +2181,22 @@ function renderSimpleDeviceBody(device) {
   const healthLabel = health === 'NoIssues' ? 'All Clear' : health || '—';
 
   if (device.type === 'rally-bar') {
-    const inCallText = device.inCall ? 'In Meeting' : 'Idle';
-    const statusText = device.status === 'online'
-      ? (device.inCall ? 'Online · In Call' : 'Online · Idle')
-      : 'Offline';
-    const statusCls = device.status !== 'online' ? 'error' : device.inCall ? 'warn' : 'ok';
+    const stateText = device.deviceState === 'IN_USE' ? 'In Call' : device.deviceState === 'AUDIO_ONLY' ? 'Audio Only' : device.deviceState === 'IDLE' ? 'Idle' : device.inCall ? 'In Meeting' : 'Idle';
+    const statusText = device.status === 'online' ? `Online · ${stateText}` : 'Offline';
+    const statusCls = device.status !== 'online' ? 'error' : (device.deviceState === 'IN_USE' || device.inCall) ? 'warn' : 'ok';
     metrics.push({ label: 'Status', value: statusText, cls: statusCls });
     if (health) metrics.push({ label: 'Sync Health', value: healthLabel, cls: healthCls });
-    metrics.push({ label: 'Use', value: inCallText, cls: device.inCall ? 'warn' : 'ok' });
+    // Live from CollabOS local API (only populated when Local Network Access is enabled)
+    if (device.micMuted !== undefined) {
+      metrics.push({ label: 'Mic', value: device.micMuted ? 'MUTED' : 'Unmuted', cls: device.micMuted ? 'warn' : 'ok' });
+    }
+    if (device.speakerVolume !== undefined) {
+      const volText = device.speakerMuted ? 'MUTED' : `${device.speakerVolume}/${device.speakerMaxVolume || 10}`;
+      metrics.push({ label: 'Speaker', value: volText, cls: device.speakerMuted ? 'warn' : 'ok' });
+    }
+    if (device.occupancyCount !== undefined) {
+      metrics.push({ label: 'People', value: String(device.occupancyCount), cls: device.occupancyCount > 0 ? 'warn' : 'ok' });
+    }
     metrics.push({ label: 'Firmware', value: device.firmware || '—', cls: 'ok' });
   } else if (device.type === 'tap' || device.type === 'sight') {
     metrics.push({ label: 'Status', value: device.status === 'online' ? 'Online' : 'Offline', cls: device.status === 'online' ? 'ok' : 'error' });
@@ -2220,6 +2228,30 @@ function renderSimpleDeviceBody(device) {
     ${peripheralAlerts.length > 0 ? `
       <div class="device-note" style="color: var(--yellow, #eab308);">
         ⚠ Peripheral mismatch: ${peripheralAlerts.join(' · ')}
+      </div>
+    ` : ''}
+    ${device.type === 'rally-bar' && device.environmental ? `
+      <div class="device-note">
+        <strong>Environmental:</strong>
+        ${device.environmental.co2 !== undefined ? ` CO₂ ${device.environmental.co2} ppm · ` : ''}
+        ${device.environmental.tempC !== undefined ? `${Math.round(device.environmental.tempC * 9/5 + 32)}°F · ` : ''}
+        ${device.environmental.humidity !== undefined ? `${Math.round(device.environmental.humidity)}% humidity` : ''}
+        ${device.environmental.presence ? ` · ${device.environmental.presence}` : ''}
+      </div>
+    ` : ''}
+    ${device.type === 'rally-bar' && device.connectedDisplays?.length ? `
+      <div class="device-note">
+        <strong>Displays:</strong> ${device.connectedDisplays.map(d => `HDMI${d.hdmiPort}: ${d.width}×${d.height}@${d.refreshRate}Hz`).join(', ')}
+      </div>
+    ` : ''}
+    ${device.type === 'rally-bar' && device.connectedUsbDevices?.length ? `
+      <div class="device-note">
+        <strong>USB:</strong> ${device.connectedUsbDevices.map(u => u.name).join(', ')}
+      </div>
+    ` : ''}
+    ${device.type === 'rally-bar' && device.serial ? `
+      <div class="device-note" style="color: var(--text-muted); font-size: 11px;">
+        S/N ${device.serial} · ${device.hostName || ''}
       </div>
     ` : ''}
   `;

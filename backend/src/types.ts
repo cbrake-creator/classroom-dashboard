@@ -83,6 +83,26 @@ export interface RallyBarDevice extends BaseDevice {
   firmware: string;
   healthStatus?: 'NoIssues' | 'Warning' | 'Error';
   peripherals?: Record<string, { expected: number; actual: number }>;
+  // Live state from Rally Bar's local CollabOS admin API (when enabled).
+  deviceState?: 'IDLE' | 'AUDIO_ONLY' | 'IN_USE';
+  micMuted?: boolean;
+  speakerMuted?: boolean;
+  speakerVolume?: number;
+  speakerMaxVolume?: number;
+  occupancyCount?: number;
+  environmental?: {
+    co2?: number;
+    tempC?: number;
+    humidity?: number;
+    pm25?: number;
+    presence?: 'OCCUPIED' | 'UNOCCUPIED';
+  };
+  // Actual connected peripherals from the local API.
+  connectedDisplays?: Array<{ hdmiPort: number; width: number; height: number; refreshRate: number }>;
+  connectedUsbDevices?: Array<{ name: string; pid: string; vid: string }>;
+  serial?: string;
+  hostName?: string;
+  localAdminEnabled?: boolean;
 }
 export interface TapDevice extends BaseDevice {
   type: 'tap';

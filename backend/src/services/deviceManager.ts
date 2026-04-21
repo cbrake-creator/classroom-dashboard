@@ -26,6 +26,7 @@ import * as canon from '../devices/canon.js';
 import * as mac from '../devices/mac.js';
 import * as rodecaster from '../devices/rodecaster.js';
 import * as sync from '../devices/logitechSync.js';
+import * as logiLocal from '../devices/logitechLocal.js';
 import { ping } from '../devices/pinger.js';
 import { getDevice, getState, patchDevice } from './roomState.js';
 import { broadcastDeviceUpdate, broadcastDeviceError } from '../ws/socketServer.js';
@@ -142,25 +143,80 @@ async function refreshDevice(device: Device): Promise<Partial<Device> | null> {
   }
 }
 
-// Rally Bar: prefer Sync Cloud API (authoritative real-time data), fall
-// back to ping. Sync tells us 'InUse' (in a Teams/Zoom call), healthStatus,
-// peripheral expected-vs-actual, and firmware — none of which ping can.
+// Rally Bar: stack three data sources, best-to-fallback:
+//  1. Sync Cloud (60s cached, org-wide) — healthStatus, peripheral counts
+//  2. Local CollabOS API (per device, sub-second, when Local Network Access
+//     is enabled in Sync Portal) — live device/mic/speaker state, occupancy,
+//     environmental sensors, actual connected peripherals
+//  3. ICMP ping — online/offline floor when neither above reachable
+// Cloud + local run in parallel; if both available we merge.
 async function refreshRallyBar(device: Device & { ip: string }): Promise<Partial<Device>> {
-  const live = sync.findByIp(device.ip);
-  if (live) {
-    const inCall = live.status === 'InUse';
-    const onlineLike = live.status === 'Online' || live.status === 'InUse';
-    return {
-      status: onlineLike ? 'online' : 'offline',
-      inCall,
-      firmware: live.firmware ?? undefined,
-      healthStatus: live.health,
-      peripherals: live.peripherals ?? undefined,
-      lastError: live.health === 'Error' ? 'Logitech Sync flagged Error' : null,
-    } as Partial<Device>;
+  const [cloudResult, localResult] = await Promise.allSettled([
+    Promise.resolve(sync.findByIp(device.ip)),
+    logiLocal.getAll(device.ip),
+  ]);
+  const cloud = cloudResult.status === 'fulfilled' ? cloudResult.value : undefined;
+  const local = localResult.status === 'fulfilled' ? localResult.value : undefined;
+
+  // Derive base status: cloud's InUse is authoritative for "is there a call",
+  // local's deviceState is more granular (IDLE vs AUDIO_ONLY vs IN_USE).
+  const cloudOnline = cloud && (cloud.status === 'Online' || cloud.status === 'InUse');
+  const localOnline = Boolean(local?.deviceInsights);
+  const onlineLike = cloudOnline || localOnline;
+
+  // If neither cloud nor local say anything, ping as last resort.
+  if (!cloud && !localOnline) {
+    return refreshViaPing(device);
   }
-  // Not in Sync (maybe unlicensed or just not yet populated) — ping.
-  return refreshViaPing(device);
+
+  const patch: Partial<Device> = {
+    status: onlineLike ? 'online' : 'offline',
+    inCall: Boolean(cloud?.status === 'InUse' || local?.deviceInsights?.deviceState === 'IN_USE'),
+    firmware: local?.config?.collabOSVersion ?? cloud?.firmware ?? undefined,
+    healthStatus: cloud?.health,
+    peripherals: cloud?.peripherals ?? undefined,
+    lastError: cloud?.health === 'Error' ? 'Logitech Sync flagged Error' : null,
+    localAdminEnabled: localOnline,
+  } as Partial<Device>;
+
+  if (local?.deviceInsights) {
+    patch.deviceState = local.deviceInsights.deviceState;
+    patch.micMuted = local.deviceInsights.micState === 'MUTED';
+    patch.speakerMuted = local.deviceInsights.speakerState === 'MUTED';
+    patch.speakerVolume = local.deviceInsights.speakerVolume;
+    patch.speakerMaxVolume = local.deviceInsights.speakerMaxVolume;
+  }
+  if (local?.roomInsights) {
+    patch.occupancyCount = local.roomInsights.occupancyCount;
+    if (local.roomInsights.environmentalData) {
+      const e = local.roomInsights.environmentalData;
+      patch.environmental = {
+        co2: e.co2,
+        tempC: e.temp,
+        humidity: e.relativeHumidity,
+        pm25: e.pm25,
+        presence: e.presence,
+      };
+    }
+  }
+  if (local?.config) {
+    patch.serial = local.config.serialNumber;
+    patch.hostName = local.config.systemName;
+  }
+  if (local?.peripherals) {
+    patch.connectedDisplays = local.peripherals.displays.map((d) => ({
+      hdmiPort: d.hdmiPort,
+      width: d.width,
+      height: d.height,
+      refreshRate: d.refreshRate,
+    }));
+    patch.connectedUsbDevices = local.peripherals.usbDevices.map((u) => ({
+      name: u.name,
+      pid: u.pid,
+      vid: u.vid,
+    }));
+  }
+  return patch;
 }
 
 // Tap / Sight are USB-chained to a Rally Bar so they have no IP, but Sync
