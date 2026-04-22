@@ -17,7 +17,6 @@ import type {
   PearlDevice,
   RallyBarDevice,
   Room,
-  RodecasterDevice,
   SightDevice,
   TapDevice,
 } from '../types.js';
@@ -258,7 +257,7 @@ function makeFacultyPodcastStudio(): Room {
   // Faculty Podcast Studio's Pearl 2 — mDNS-advertised as its serial
   // "TS25901165" instead of a friendly name, which is why it didn't show up
   // in the first "Pearl"-filtered scan.
-  const pearl = makePearlStub('10.56.1.250', 'Faculty Podcast Pearl');
+  const pearl = makePearlStub('10.56.1.236', 'Faculty Podcast Pearl');
 
   const mac: MacDevice = {
     id: 'mac-1',
@@ -287,46 +286,27 @@ function makeFacultyPodcastStudio(): Room {
     ],
   };
 
-  const rodecaster: RodecasterDevice = {
-    id: 'rcp-1',
-    type: 'rodecaster',
-    brand: 'Rode',
-    model: 'Rodecaster Pro II',
-    ip: 'via mac-1 USB',
-    detectedVia: 'mac-1',
-    status: 'online',
-    power: true,
-    firmware: '2.1.0',
-    serial: 'RP2-9F3X-22A1',
-    strips: [
-      { name: 'Mic 1 (Host)', levelDb: -18, muted: false },
-      { name: 'Mic 2 (Guest)', levelDb: -22, muted: false },
-      { name: 'Mic 3', levelDb: null, muted: true },
-      { name: 'Mic 4', levelDb: null, muted: true },
-      { name: 'USB 1 (Mac)', levelDb: -30, muted: false },
-      { name: 'Bluetooth', levelDb: null, muted: true },
-    ],
-  };
-
   // The DAW is a logical device — a sidecar process on the Mac above
   // opens a Socket.IO connection to us and owns the real audio I/O.
   // Until the sidecar dials in, status is 'offline' and sidecarConnected
-  // is false; the sidecarServer flips these on connect.
+  // is false; the sidecarServer flips these on connect. Strip labels below
+  // are the defaults shown before the sidecar's hello arrives; once it does,
+  // they're replaced by whatever STRIPS= in sidecar.env says.
   const dawStrips = [
-    'Mic 1 (Host)',
-    'Mic 2 (Guest A)',
-    'Mic 3 (Guest B)',
-    'Mic 4 (Guest C)',
-    'USB 1 (Mac L)',
-    'USB 1 (Mac R)',
-    'USB 2 L',
-    'USB 2 R',
-    'Bluetooth L',
-    'Bluetooth R',
-    'Sound Pad L',
-    'Sound Pad R',
-    'Mix-Minus L',
-    'Mix-Minus R',
+    'Main Mix L',
+    'Main Mix R',
+    'Mic 1 (Host) L',
+    'Mic 1 (Host) R',
+    'Mic 2 (Guest A) L',
+    'Mic 2 (Guest A) R',
+    'Mic 3 (Guest B) L',
+    'Mic 3 (Guest B) R',
+    'Mic 4 (Guest C) L',
+    'Mic 4 (Guest C) R',
+    'Ch 11',
+    'Ch 12',
+    'Ch 13',
+    'Ch 14',
   ].map((name, i): DawStrip => ({
     name,
     channel: i + 1,
@@ -352,13 +332,14 @@ function makeFacultyPodcastStudio(): Room {
     strips: dawStrips,
     recording: { active: false, startedAt: null, durationSec: 0, outputPath: null },
     monitoring: false,
+    outputDir: null,
   };
 
   return {
     id: 'faculty-podcast',
     name: 'Faculty Podcast Studio',
     type: 'studio',
-    devices: [pearl, cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, rodecaster, daw],
+    devices: [pearl, cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, daw],
   };
 }
 

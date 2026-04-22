@@ -129,15 +129,28 @@ export async function getPublishers(host: string, channelId: number): Promise<Pe
 }
 
 export async function getSources(host: string): Promise<PearlSource[]> {
+  // /sources/status returns each source with a `status` object:
+  //   video: { state: 'active'|'inactive', resolution: 'WxH', actual_fps, ... }
+  //   audio: { state: 'active'|'inactive', levels?: {...} }
+  // A source is "connected" (real signal present) when it has active video
+  // at a non-zero resolution, or active audio. /sources without /status only
+  // lists the ports and never exposes signal — so we always want /status.
   const c = client(host);
-  const res = await c.get('/sources');
-  const list = (res.data?.result ?? res.data ?? []) as Array<Record<string, unknown>>;
-  return list.map((s) => ({
-    id: String(s.id),
-    name: String(s.name ?? s.id),
-    connected: Boolean(s.signal ?? s.connected ?? false),
-    label: String(s.label ?? s.name ?? '—'),
-  }));
+  const res = await c.get('/sources/status');
+  const list = (res.data?.result ?? []) as Array<Record<string, any>>;
+  return list.map((s) => {
+    const st = s.status ?? {};
+    const v = st.video ?? null;
+    const a = st.audio ?? null;
+    const hasVideo = v?.state === 'active' && typeof v?.resolution === 'string' && v.resolution !== '0x0';
+    const hasAudio = a?.state === 'active';
+    return {
+      id: String(s.id),
+      name: String(s.name ?? s.id),
+      connected: hasVideo || hasAudio,
+      label: String(s.label ?? s.name ?? '—'),
+    };
+  });
 }
 
 // ─── Writes / commands ─────────────────────────────────────

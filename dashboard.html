@@ -456,6 +456,11 @@
     transition: all 0.15s;
   }
   .ptz-btn:hover { background: var(--bg-card-hover); border-color: var(--blue); }
+  .ptz-btn.ptz-active, .zoom-btn.ptz-active {
+    background: var(--blue); color: #fff; border-color: var(--blue);
+  }
+  /* Stop the OS long-press context menu on mobile. */
+  [data-hold-url] { touch-action: none; -webkit-user-select: none; user-select: none; }
   .ptz-center { grid-column: 2; grid-row: 2; }
   .zoom-controls {
     display: flex;
@@ -843,6 +848,32 @@
   .pearl-onetouch.recording .pearl-rec-time { color: var(--red); }
   .pearl-rec-sub { font-size: 11px; color: var(--text-muted); }
 
+  /* Single room-level REC button in the studio session bar. Starts/stops
+     Pearl + DAW in one click via /api/studio/<room>/start-session. */
+  .studio-rec-btn {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    min-width: 140px; height: 56px; padding: 0 22px;
+    background: #16a34a; color: #fff; border: none; border-radius: 8px;
+    font-size: 18px; font-weight: 800; letter-spacing: 2px; cursor: pointer;
+    transition: transform .08s, background .15s, box-shadow .2s;
+    box-shadow: 0 2px 0 rgba(0,0,0,.25) inset;
+  }
+  .studio-rec-btn:hover { background: #15803d; }
+  .studio-rec-btn:active { transform: translateY(1px); }
+  .studio-rec-btn.recording {
+    background: #dc2626;
+    box-shadow: 0 0 0 2px rgba(239,68,68,.6), 0 0 20px rgba(239,68,68,.4);
+    animation: pearl-rec-pulse 1.4s ease-in-out infinite;
+  }
+  .studio-rec-dot {
+    width: 14px; height: 14px; border-radius: 50%; background: #fff;
+    box-shadow: 0 0 6px rgba(255,255,255,.6);
+  }
+  .studio-rec-btn.recording .studio-rec-dot {
+    animation: pearl-rec-dot-pulse 1s ease-in-out infinite;
+  }
+  .studio-rec-label { font-family: 'SF Mono', monospace; }
+
   .pearl-recordings {
     margin-top: 12px; padding: 10px 12px;
     background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;
@@ -995,8 +1026,62 @@
   .rcp-meter-fill {
     position: absolute; left: 0; top: 0; bottom: 0;
     background: linear-gradient(90deg, var(--green) 0%, var(--green) 60%, var(--yellow) 80%, var(--red) 100%);
+    /* Smooth the 20 Hz peak updates so the bar doesn't strobe between ticks.
+       On meter rise we want a near-instant attack; on fall we want a soft
+       decay so brief silences don't flash the bar to zero. JS handles the
+       asymmetry by snapping width up immediately and letting CSS transition
+       handle fall only. */
+    transition: width 60ms linear;
+    will-change: width;
   }
   .rcp-strip-icon { color: var(--text-muted); text-align: right; font-size: 12px; }
+
+  /* DAW output-folder input row */
+  .daw-outdir-row { display: flex; gap: 6px; margin-bottom: 8px; }
+  .daw-outdir-input {
+    flex: 1; min-width: 0; padding: 6px 10px;
+    background: var(--bg-card); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-family: 'SF Mono', monospace; font-size: 12px;
+  }
+  .daw-outdir-input:focus { outline: none; border-color: var(--blue); }
+
+  /* Folder-picker modal */
+  .fs-modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    z-index: 9998; display: flex; align-items: center; justify-content: center;
+  }
+  .fs-modal {
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: 8px; width: min(640px, 92vw); max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    font-family: -apple-system, sans-serif;
+  }
+  .fs-modal-header {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .fs-modal-header .fs-crumb {
+    flex: 1; min-width: 0; font-family: 'SF Mono', monospace; font-size: 12px;
+    color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .fs-modal-body {
+    flex: 1; overflow-y: auto; padding: 8px 0;
+  }
+  .fs-entry {
+    display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+    font-size: 13px; cursor: pointer; color: var(--text-primary);
+    border-left: 3px solid transparent;
+  }
+  .fs-entry:hover { background: var(--bg-card); border-left-color: var(--blue); }
+  .fs-entry.not-writable { color: var(--text-muted); }
+  .fs-entry .fs-icon { width: 16px; text-align: center; }
+  .fs-entry .fs-lock { margin-left: auto; font-size: 10px; color: var(--text-muted); }
+  .fs-modal-footer {
+    padding: 10px 16px; border-top: 1px solid var(--border);
+    display: flex; gap: 8px; justify-content: flex-end;
+  }
+  .fs-empty { padding: 20px; text-align: center; color: var(--text-muted); font-size: 12px; }
 
   /* Limitations / dev note footer */
   .device-note {
@@ -1113,6 +1198,69 @@ function patchDeviceInConfig(campusId, roomId, device) {
   return true;
 }
 
+function findDeviceInConfig(campusId, roomId, deviceId) {
+  const campus = CONFIG.campuses.find(c => c.id === campusId);
+  const room = campus && campus.rooms.find(r => r.id === roomId);
+  return room ? room.devices.find(d => d.id === deviceId) : null;
+}
+
+// True when the only change between `prev` and `next` is strips[].peakDb —
+// i.e. a live-meter tick that we can paint without a full re-render.
+function isDawLevelsOnlyPatch(prev, next) {
+  if (!prev || !next || prev.type !== 'daw' || next.type !== 'daw') return false;
+  const scalars = ['status','sidecarConnected','sidecarVersion','captureDevice','sampleRate','monitoring','outputDir'];
+  for (const k of scalars) if (prev[k] !== next[k]) return false;
+  if (JSON.stringify(prev.recording||null) !== JSON.stringify(next.recording||null)) return false;
+  const a = prev.strips || [], b = next.strips || [];
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].channel !== b[i].channel || a[i].name !== b[i].name ||
+        a[i].muted !== b[i].muted || a[i].solo !== b[i].solo ||
+        a[i].faderDb !== b[i].faderDb) return false;
+  }
+  return true;
+}
+
+// Peak-hold state per device+channel. Instant attack on rising peaks,
+// constant-dB-per-second decay on fall. Without this the bars strobe between
+// each sidecar tick (~20 Hz) because individual 50 ms audio windows often
+// contain a peak followed by near-silence.
+const dawMeterState = new Map(); // key: device.id  → { lastTick, peaks: number[], holdPeaks: number[] }
+const METER_DECAY_DB_PER_SEC = 40; // VU-style fall-off
+const PEAK_HOLD_MS = 800;          // keep the little peak dot fixed briefly
+
+// In-place meter update — no innerHTML rewrite, so clicks on other controls
+// in the same card/page don't get dropped.
+function updateDawMeters(device) {
+  const card = document.querySelector(`.device-card[data-device-id="${device.id}"]`);
+  if (!card) return;
+  const rows = card.querySelectorAll('.rcp-strip[data-group-indices]');
+  const strips = device.strips || [];
+  const fmt = p => (p == null || p <= -120) ? '—' : (p >= 0 ? '0' : p.toFixed(0)) + ' dB';
+  const pct = p => (p == null) ? 0 : Math.max(0, Math.min(100, ((p + 60) / 60) * 100));
+
+  let st = dawMeterState.get(device.id);
+  const now = performance.now();
+  if (!st) {
+    st = { lastTick: now, peaks: new Array(rows.length).fill(-120) };
+    dawMeterState.set(device.id, st);
+  }
+  const dt = Math.max(0, (now - st.lastTick) / 1000);
+  st.lastTick = now;
+  const decay = METER_DECAY_DB_PER_SEC * dt;
+
+  rows.forEach((row, gi) => {
+    const indices = row.dataset.groupIndices.split(',').map(Number);
+    // Max peakDb across the group's channels (stereo pair -> louder of L/R)
+    const raw = Math.max(...indices.map(i => (strips[i]?.peakDb ?? -120)));
+    if (st.peaks[gi] === undefined) st.peaks[gi] = -120;
+    const shown = (raw > st.peaks[gi]) ? raw : Math.max(raw, st.peaks[gi] - decay);
+    st.peaks[gi] = shown;
+    const fill = row.querySelector('.rcp-meter-fill');
+    if (fill) fill.style.width = pct(shown) + '%';
+  });
+}
+
 function setConnState(connected) {
   const dot = document.getElementById('refreshDot');
   const label = document.getElementById('lastRefresh');
@@ -1147,8 +1295,12 @@ let state = {
 
 function getDeviceIssues(device) {
   const issues = [];
-  if (device.status === 'offline') issues.push('Device offline');
-  if (device.status === 'unknown') issues.push('Status unknown (no live poll yet)');
+  // DAW is push-based (sidecar opens a socket and emits state) — it never
+  // goes through the HTTP poller, so the poller's 'unknown' marker is
+  // meaningless here. Its real status bubbles up via sidecarConnected.
+  if (device.status === 'offline' && device.type !== 'daw') issues.push('Device offline');
+  if (device.status === 'unknown' && device.type !== 'daw') issues.push('Status unknown (no live poll yet)');
+  if (device.type === 'daw' && !device.sidecarConnected) issues.push('DAW sidecar not connected');
   if (device.type === 'display' && device.power === false) issues.push('Powered off');
   if (device.type === 'display' && device.currentInput !== device.correctInput) issues.push(`Wrong input (${device.currentInput}, expected ${device.correctInput})`);
   if (device.type === 'camera' && device.power === false) issues.push('Camera off');
@@ -1166,17 +1318,15 @@ function getDeviceIssues(device) {
     if (device.cpu > 80) issues.push('Pearl CPU high');
     if (device.temp && device.temp > 75) issues.push('Pearl temperature high');
     if (device.storage && (device.storage.freeGb / device.storage.totalGb) < 0.10) issues.push('Pearl storage <10%');
-    (device.sources || []).forEach(s => {
-      if (!s.connected && s.label && s.label !== '—') issues.push(`Pearl source ${s.name} disconnected`);
-    });
+    // Per-source connected state is shown as green/grey dots in the Inputs
+    // section — no need to also shout it as a card-level error. Empty ports
+    // (HDMI-B with no cable) aren't really issues, just unused.
   }
   if (device.type === 'mac') {
     if (device.cpu > 80) issues.push('Mac CPU high');
     if (device.mem > 85) issues.push('Mac memory high');
     if (device.disk && (device.disk.freeGb / device.disk.totalGb) < 0.10) issues.push('Mac disk <10%');
   }
-  if (device.type === 'rodecaster' && device.status === 'offline') issues.push('Rodecaster not detected on Mac USB');
-  if (device.type === 'daw' && !device.sidecarConnected) issues.push('DAW sidecar not connected');
   return issues;
 }
 
@@ -1614,11 +1764,9 @@ function renderStudioSessionBar(room) {
         </div>
       </div>
       <div class="studio-session-actions">
-        <button class="ctrl-btn ctrl-btn-${sess.live ? 'red' : 'green'}" onclick="cmd('/api/studio/${room.id}/${sessionPath}')" title="POST /api/studio/${room.id}/${sessionPath}">
-          ${sess.live ? '&#9632; Stop Session' : '&#9679; Start Session'}
-        </button>
-        <button class="ctrl-btn ctrl-btn-neutral" onclick="cmd('/api/studio/${room.id}/prep')" title="POST /api/studio/${room.id}/prep">
-          &#9881; Prep Studio
+        <button class="studio-rec-btn ${sess.live ? 'recording' : ''}" onclick="cmd('/api/studio/${room.id}/${sessionPath}')" title="POST /api/studio/${room.id}/${sessionPath}">
+          <span class="studio-rec-dot"></span>
+          <span class="studio-rec-label">${sess.live ? 'STOP' : 'REC'}</span>
         </button>
       </div>
     </div>
@@ -1667,7 +1815,7 @@ function renderDeviceCard(device) {
   }
 
   return `
-    <div class="device-card">
+    <div class="device-card" data-device-id="${device.id}">
       <div class="device-card-header">
         <div class="device-card-header-left">
           <div class="device-icon">${deviceIcon(device.type)}</div>
@@ -1756,21 +1904,22 @@ function renderCameraBody(device) {
       <div class="cam-pos-item">Zoom <span class="cam-pos-value">${isOnline ? device.zoomPos + '%' : '—'}</span></div>
     </div>
 
-    <!-- PTZ Controls (control.cgi) -->
+    <!-- PTZ Controls (control.cgi). Press-and-hold for continuous move
+         via the global pointerdown handler installed in attachPtzHold(). -->
     <div class="ptz-controls">
       <div></div>
-      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'tilt-up' })" title="Tilt Up">&#9650;</button>
+      <button class="ptz-btn" data-hold-url="/api/canon/${device.id}/ptz" data-hold-body='{"action":"tilt-up"}' title="Tilt Up">&#9650;</button>
       <div></div>
-      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'pan-left' })" title="Pan Left">&#9664;</button>
+      <button class="ptz-btn" data-hold-url="/api/canon/${device.id}/ptz" data-hold-body='{"action":"pan-left"}' title="Pan Left">&#9664;</button>
       <button class="ptz-btn ptz-center" onclick="cmd('/api/canon/${device.id}/home')" title="Home Preset">&#8962;</button>
-      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'pan-right' })" title="Pan Right">&#9654;</button>
+      <button class="ptz-btn" data-hold-url="/api/canon/${device.id}/ptz" data-hold-body='{"action":"pan-right"}' title="Pan Right">&#9654;</button>
       <div></div>
-      <button class="ptz-btn" onclick="cmd('/api/canon/${device.id}/ptz', { action: 'tilt-down' })" title="Tilt Down">&#9660;</button>
+      <button class="ptz-btn" data-hold-url="/api/canon/${device.id}/ptz" data-hold-body='{"action":"tilt-down"}' title="Tilt Down">&#9660;</button>
       <div></div>
     </div>
     <div class="zoom-controls">
-      <button class="zoom-btn" onclick="cmd('/api/canon/${device.id}/zoom', { direction: 'out' })" title="Zoom Out">&minus;</button>
-      <button class="zoom-btn" onclick="cmd('/api/canon/${device.id}/zoom', { direction: 'in' })" title="Zoom In">&plus;</button>
+      <button class="zoom-btn" data-hold-url="/api/canon/${device.id}/zoom" data-hold-body='{"direction":"out"}' title="Zoom Out">&minus;</button>
+      <button class="zoom-btn" data-hold-url="/api/canon/${device.id}/zoom" data-hold-body='{"direction":"in"}' title="Zoom In">&plus;</button>
     </div>
 
     <!-- 3-slot per-camera presets (classroom rooms only; studios use the room-level multi-cam panel) -->
@@ -1890,20 +2039,10 @@ function renderPearlBody(device) {
   pearlRecState.set(device.id, { recording, baseSec: pearlDurSec, baseAt: Date.now() });
 
   return `
-    <!-- One-touch record — mirrors the hardware REC button on the Pearl -->
-    <div class="pearl-onetouch ${recording ? 'recording' : ''}">
-      <button class="pearl-rec-btn ${recording ? 'recording' : ''}"
-              onclick="cmd('/api/pearl/${device.id}/record-all/${recording ? 'stop' : 'start'}')"
-              title="POST /api/pearl/${device.id}/record-all/${recording ? 'stop' : 'start'}"
-              ${isOnline ? '' : 'disabled'}>
-        <span class="pearl-rec-dot"></span>
-        <span class="pearl-rec-label">${recording ? 'STOP' : 'REC'}</span>
-      </button>
-      <div class="pearl-rec-meta">
-        <div class="pearl-rec-time" data-pearlid="${device.id}">${formatHMS(pearlDurSec)}</div>
-        <div class="pearl-rec-sub">${(device.recorders || []).length} recorder${(device.recorders||[]).length === 1 ? '' : 's'} · ${recording ? 'Recording all' : 'Idle'}</div>
-      </div>
-    </div>
+    <!-- Pearl's per-card REC button was removed in favour of the single
+         room-level REC in the studio session bar, which fires Pearl + DAW
+         recording in one click. Recording state pills below still reflect
+         the current Pearl state. -->
 
     <!-- Recent recordings (loaded async; click to play in-browser) -->
     <div id="pearl-recordings-${device.id}" class="pearl-recordings"></div>
@@ -2129,13 +2268,38 @@ function renderRodecasterBody(device) {
   `;
 }
 
+// Collapse adjacent L/R pairs (same base name ending in " L"/" R") into one
+// logical meter. Keeps the underlying strip channels intact for the recorder,
+// just tidier in the UI — the Rodecaster duplicates each mono mic across two
+// channels so showing 14 bars would double-count every mic.
+function groupDawStrips(strips) {
+  const groups = [];
+  for (let i = 0; i < strips.length; i++) {
+    const s = strips[i], n = strips[i+1];
+    const isPair = n && s.name.endsWith(' L') && n.name.endsWith(' R') &&
+                   s.name.slice(0, -2) === n.name.slice(0, -2);
+    if (isPair) {
+      groups.push({ label: s.name.slice(0, -2), indices: [i, i+1], muted: s.muted && n.muted });
+      i++; // consume R
+    } else {
+      groups.push({ label: s.name, indices: [i], muted: !!s.muted });
+    }
+  }
+  return groups;
+}
+
 function renderDawBody(device) {
   const sidecar = !!device.sidecarConnected;
   const rec = device.recording || { active: false, durationSec: 0 };
   const strips = device.strips || [];
-  const activeStrips = strips.filter(s => !s.muted).length;
+  const groups = groupDawStrips(strips);
+  const activeStrips = groups.filter(g => !g.muted).length;
   const durSec = Math.floor(rec.durationSec || 0);
   const durStr = `${Math.floor(durSec/60)}:${String(durSec%60).padStart(2,'0')}`;
+
+  const formatPeak = p => (p == null || p <= -120) ? '—' : (p >= 0 ? '0' : p.toFixed(0)) + ' dB';
+  // Map -60 dB → 0%, 0 dB → 100%. Values below -60 clamp to 0.
+  const meterPct = p => (p == null) ? 0 : Math.max(0, Math.min(100, ((p + 60) / 60) * 100));
 
   return `
     <!-- Sidecar connection bar -->
@@ -2148,8 +2312,8 @@ function renderDawBody(device) {
     <!-- Summary metrics -->
     <div class="metrics-grid" style="margin-top:10px;">
       <div class="metric-item">
-        <div class="metric-label">Channels</div>
-        <div class="metric-value ok">${activeStrips} / ${strips.length} active</div>
+        <div class="metric-label">Sources</div>
+        <div class="metric-value ok">${activeStrips} / ${groups.length} active</div>
       </div>
       <div class="metric-item">
         <div class="metric-label">Recording</div>
@@ -2161,15 +2325,36 @@ function renderDawBody(device) {
       </div>
     </div>
 
-    <!-- Open the real mixer -->
-    <div class="control-row" style="margin-top:10px;">
-      <a class="ctrl-btn ctrl-btn-green" href="/studio/daw/?device=${encodeURIComponent(device.id)}" target="_blank" rel="noopener" style="text-decoration:none;">
-        &#9835; Open Mixer &rarr;
-      </a>
+    <!-- Output folder — where the sidecar writes one WAV per channel. -->
+    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:12px 0 6px;">Output Folder</div>
+    <div class="daw-outdir-row">
+      <input type="text" class="daw-outdir-input" data-daw-id="${device.id}"
+             value="${device.outputDir || ''}"
+             placeholder="~/Documents/studio-daw-recordings"
+             spellcheck="false" autocomplete="off" />
+      <button class="ctrl-btn ctrl-btn-neutral daw-outdir-browse" data-daw-id="${device.id}">Browse…</button>
+      <button class="ctrl-btn ctrl-btn-neutral daw-outdir-save" data-daw-id="${device.id}">Save</button>
+    </div>
+    <div class="device-note" style="font-size:10px;">
+      Each channel is written to its own mono 24-bit WAV under a timestamped subfolder, so DAWs that don't import multichannel (GarageBand) can still pull each mic into a track.
     </div>
 
-    <div class="device-note">
-      Full RØDECaster-style mixing board opens in a new tab. Faders, EQ, mute/solo, sound pad, record &amp; tracks all live there.
+    <!-- Live per-channel input levels (driven by sidecar 'levels' events) -->
+    <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:12px 0 6px;">Input Levels</div>
+    <div class="rcp-strip-list">
+      ${groups.map(g => {
+        const peak = Math.max(...g.indices.map(i => strips[i]?.peakDb ?? -120));
+        const chLabel = g.indices.length === 2 ? ` · ch ${g.indices[0]+1}-${g.indices[1]+1}` : ` · ch ${g.indices[0]+1}`;
+        return `
+        <div class="rcp-strip ${g.muted ? 'muted' : ''}" data-group-indices="${g.indices.join(',')}">
+          <span class="rcp-strip-name">${g.label}<span style="color:var(--text-muted); font-weight:400; font-size:10px;">${chLabel}</span></span>
+          <div class="rcp-meter">
+            <div class="rcp-meter-fill" style="width:${meterPct(peak)}%"></div>
+          </div>
+          <span class="rcp-strip-icon">${g.muted ? '&#128263;' : ''}</span>
+        </div>
+        `;
+      }).join('')}
     </div>
   `;
 }
@@ -2568,8 +2753,16 @@ async function bootstrap() {
     });
 
     socket.on('device:update', ({ campusId, roomId, device }) => {
+      const prev = findDeviceInConfig(campusId, roomId, device.id);
       if (patchDeviceInConfig(campusId, roomId, device)) {
-        // Re-render only if user is currently looking at the affected room or dashboard.
+        // Level-meter ticks arrive at 20 Hz. A full render() every time both
+        // flickers the whole page and eats clicks on transient buttons (camera
+        // PTZ, presets). Detect strips-only patches and update meter widths
+        // in place instead.
+        if (isDawLevelsOnlyPatch(prev, device)) {
+          updateDawMeters(device);
+          return;
+        }
         if (state.currentView === 'dashboard' || state.currentRoomId === roomId) {
           render();
         }
@@ -2589,8 +2782,175 @@ async function bootstrap() {
     render();
   });
 
+  attachPtzHold();
+  attachDawOutputDirSave();
+
   // Live camera previews are now true MJPEG streams (multipart/x-mixed-replace),
   // so the browser handles per-frame updates — no JS polling needed.
+}
+
+// Folder-picker modal. Opens from the "Browse…" button next to the DAW
+// output-folder input. Lists directories from the host Mac via /api/fs/browse;
+// user navigates and picks a folder, which gets written into the input.
+async function openFolderPicker(startPath, onPick) {
+  let currentPath = startPath || null;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'fs-modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="fs-modal" role="dialog" aria-label="Choose folder">
+      <div class="fs-modal-header">
+        <button class="ctrl-btn ctrl-btn-neutral" data-nav="up" title="Go up">↑</button>
+        <button class="ctrl-btn ctrl-btn-neutral" data-nav="home" title="Home">⌂</button>
+        <div class="fs-crumb"></div>
+      </div>
+      <div class="fs-modal-body"></div>
+      <div class="fs-modal-footer">
+        <button class="ctrl-btn ctrl-btn-neutral" data-action="cancel">Cancel</button>
+        <button class="ctrl-btn ctrl-btn-green" data-action="select">Select this folder</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const crumb = backdrop.querySelector('.fs-crumb');
+  const body  = backdrop.querySelector('.fs-modal-body');
+  const selectBtn = backdrop.querySelector('[data-action="select"]');
+  const upBtn = backdrop.querySelector('[data-nav="up"]');
+
+  async function load(path) {
+    body.innerHTML = '<div class="fs-empty">Loading…</div>';
+    const url = path ? `/api/fs/browse?path=${encodeURIComponent(path)}` : '/api/fs/browse';
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+      const data = await res.json();
+      currentPath = data.path;
+      crumb.textContent = data.path;
+      upBtn.disabled = !data.parent;
+      selectBtn.disabled = !data.writable;
+      selectBtn.title = data.writable ? '' : 'This folder is not writable';
+      if (data.entries.length === 0) {
+        body.innerHTML = '<div class="fs-empty">No subfolders</div>';
+      } else {
+        body.innerHTML = data.entries.map(e => `
+          <div class="fs-entry ${e.writable ? '' : 'not-writable'}" data-path="${e.path.replace(/"/g,'&quot;')}">
+            <span class="fs-icon">📁</span>
+            <span>${e.name}</span>
+            ${e.writable ? '' : '<span class="fs-lock">read-only</span>'}
+          </div>
+        `).join('');
+      }
+    } catch (err) {
+      body.innerHTML = `<div class="fs-empty">Error: ${String(err.message || err)}</div>`;
+    }
+  }
+
+  backdrop.addEventListener('click', async (ev) => {
+    if (ev.target === backdrop) { close(); return; }
+    const entry = ev.target.closest('.fs-entry');
+    if (entry) { await load(entry.dataset.path); return; }
+    const nav = ev.target.closest('[data-nav]');
+    if (nav?.dataset.nav === 'up') {
+      // Reload with parent. Easiest: fetch current, use its parent.
+      const res = await fetch(`/api/fs/browse?path=${encodeURIComponent(currentPath)}`);
+      const data = await res.json();
+      if (data.parent) await load(data.parent);
+      return;
+    }
+    if (nav?.dataset.nav === 'home') { await load(null); return; }
+    const act = ev.target.closest('[data-action]');
+    if (act?.dataset.action === 'cancel') { close(); return; }
+    if (act?.dataset.action === 'select') {
+      onPick(currentPath);
+      close();
+    }
+  });
+  function close() { backdrop.remove(); }
+  await load(startPath);
+}
+
+// Save the DAW output folder — click button or press Enter in the input.
+// Fires POST /api/daw/<id>/cmd with { op: 'output-dir', args: { path } }.
+// Event delegation (not per-render listeners) keeps this resilient to the
+// card being re-rendered between edits.
+function attachDawOutputDirSave() {
+  function save(input) {
+    const id = input.dataset.dawId;
+    const path = input.value.trim();
+    if (!id || !path) return;
+    cmd(`/api/daw/${id}/cmd`, { op: 'output-dir', args: { path } })
+      .then(ok => { if (ok) showToast(`Output folder set to ${path}`, 'info'); });
+  }
+  document.addEventListener('click', (ev) => {
+    const saveBtn = ev.target.closest('.daw-outdir-save');
+    if (saveBtn) {
+      const id = saveBtn.dataset.dawId;
+      const input = document.querySelector(`.daw-outdir-input[data-daw-id="${CSS.escape(id)}"]`);
+      if (input) save(input);
+      return;
+    }
+    const browseBtn = ev.target.closest('.daw-outdir-browse');
+    if (browseBtn) {
+      const id = browseBtn.dataset.dawId;
+      const input = document.querySelector(`.daw-outdir-input[data-daw-id="${CSS.escape(id)}"]`);
+      if (!input) return;
+      openFolderPicker(input.value.trim() || null, (picked) => {
+        input.value = picked;
+        save(input);
+      });
+    }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter') return;
+    const input = ev.target.closest('.daw-outdir-input');
+    if (!input) return;
+    ev.preventDefault();
+    save(input);
+  });
+}
+
+// Press-and-hold for PTZ / zoom buttons. Canon's control.cgi doesn't expose
+// a velocity command through our backend — each POST nudges by PAN_STEP /
+// TILT_STEP / ZOOM_STEP. Firing that endpoint on an interval while the
+// button is held approximates continuous motion at ~7 steps/sec.
+function attachPtzHold() {
+  const HOLD_INTERVAL_MS = 130;
+  let timer = null;
+  let activeBtn = null;
+
+  // Fire-and-forget — each nudge is idempotent and the camera serializes them
+  // internally. An in-flight guard here would drop most ticks on slow cameras
+  // (~250ms per POST), breaking the "continuous motion" feel.
+  function fire(url, body) { cmd(url, body); }
+
+  function endHold() {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (activeBtn) { activeBtn.classList.remove('ptz-active'); activeBtn = null; }
+  }
+
+  document.addEventListener('pointerdown', (ev) => {
+    const btn = ev.target.closest('[data-hold-url]');
+    if (!btn || btn.disabled) return;
+    ev.preventDefault();
+    const url = btn.dataset.holdUrl;
+    let body = null;
+    try { body = btn.dataset.holdBody ? JSON.parse(btn.dataset.holdBody) : null; }
+    catch (e) { console.warn('bad data-hold-body', btn.dataset.holdBody, e); return; }
+    endHold();
+    activeBtn = btn;
+    btn.classList.add('ptz-active');
+    // Setting pointer capture means pointerup fires on the button even if
+    // the finger/cursor drifts off it mid-hold.
+    try { btn.setPointerCapture(ev.pointerId); } catch {}
+    fire(url, body);
+    timer = setInterval(() => fire(url, body), HOLD_INTERVAL_MS);
+  });
+
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(evt => {
+    document.addEventListener(evt, endHold);
+  });
+  // Stop if the tab is hidden — avoids an accidental runaway pan.
+  document.addEventListener('visibilitychange', () => { if (document.hidden) endHold(); });
 }
 
 function showToast(msg, kind) {

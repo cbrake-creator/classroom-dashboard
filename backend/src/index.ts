@@ -19,6 +19,7 @@ import { config } from './config.js';
 import { logger } from './logger.js';
 import canonRouter from './routes/canon.js';
 import dawRouter from './routes/daw.js';
+import fsRouter from './routes/fs.js';
 import macRouter from './routes/mac.js';
 import pearlRouter from './routes/pearl.js';
 import presetsRouter from './routes/presets.js';
@@ -57,6 +58,7 @@ app.use('/api/canon', canonRouter);
 app.use('/api/mac', macRouter);
 app.use('/api/studio', studioRouter);
 app.use('/api/daw', dawRouter);
+app.use('/api/fs', fsRouter);
 app.use('/api/presets', presetsRouter);
 
 // Health probe — handy for systemd / nginx

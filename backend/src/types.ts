@@ -233,6 +233,7 @@ export interface DawDevice extends BaseDevice {
   strips: DawStrip[];
   recording: DawRecordingState;
   monitoring: boolean;
+  outputDir: string | null;        // folder where the sidecar writes per-channel WAVs
 }
 
 // ─── Union ─────────────────────────────────────────────────

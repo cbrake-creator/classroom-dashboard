@@ -77,6 +77,7 @@ export function initSidecarNamespace(io: IOServer): void {
       version?: string;
       captureDevice?: string;
       sampleRate?: number;
+      outputDir?: string;
       strips?: DawDevice['strips'];
     }) => {
       const found = findDaw();
@@ -91,6 +92,7 @@ export function initSidecarNamespace(io: IOServer): void {
         sidecarVersion: payload.version ?? null,
         captureDevice: payload.captureDevice ?? found.device.captureDevice,
         sampleRate: payload.sampleRate ?? found.device.sampleRate,
+        outputDir: payload.outputDir ?? found.device.outputDir,
         strips: payload.strips ?? found.device.strips,
       });
     });

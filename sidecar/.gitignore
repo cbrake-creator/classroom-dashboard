@@ -1,0 +1,5 @@
+# Runtime artifacts — never committed.
+sidecar.env
+venv/
+__pycache__/
+*.pyc

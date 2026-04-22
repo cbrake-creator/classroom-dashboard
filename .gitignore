@@ -1,4 +1,5 @@
 claude-memory/
 .claude/
+.claude-start.sh
 .DS_Store
 ._*
