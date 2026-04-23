@@ -4,3 +4,11 @@ numpy>=1.26
 python-socketio[client]>=5.11.0
 python-dotenv>=1.0.0
 requests>=2.32.0
+# On macOS, explicitly request Microphone access via AVFoundation so TCC
+# renders the permission dialog when the sidecar runs under launchd. Without
+# this, the daemon silently receives zero-amplitude audio forever.
+pyobjc-framework-AVFoundation>=10.0; sys_platform == "darwin"
+# Needed alongside AVFoundation to give TCC an NSApplication context. Without
+# a running NSApp, requestAccess silently resolves to "denied" even if the
+# .app has NSMicrophoneUsageDescription and is properly code-signed.
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

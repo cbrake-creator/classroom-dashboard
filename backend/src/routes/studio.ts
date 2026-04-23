@@ -11,6 +11,7 @@ import { config } from '../config.js';
 import * as canon from '../devices/canon.js';
 import * as mac from '../devices/mac.js';
 import * as pearl from '../devices/pearl.js';
+import { sendMagicPacket } from '../devices/wol.js';
 import { logger } from '../logger.js';
 import { applyCommand } from '../services/deviceManager.js';
 import { getRoom } from '../services/roomState.js';
@@ -66,19 +67,20 @@ async function runStep(name: string, fn: () => Promise<unknown>): Promise<StepRe
   }
 }
 
-// Prep: launch the apps the host needs and route audio to the Rodecaster.
+// Prep: wake every camera out of standby. Intentionally scoped — the Pearl
+// 2 has no reliable remote wake (no WOL exposed in firmware), and the Mac
+// app-launch step tended to fail when the apps weren't installed. Cameras
+// are the only piece of the chain this button can reliably fix.
 router.post('/:roomId/prep', async (req, res) => {
   const refs = resolveStudio(req.params.roomId);
   if (!refs) return res.status(404).json({ error: 'room not found' });
-  const steps: StepResult[] = [];
-
-  if (refs.mac) {
-    const macId = refs.mac.id;
-    for (const app of ['OBS Studio', 'Audio Hijack', 'Rode Central']) {
-      steps.push(await runStep(`mac.launch.${app}`, () => applyCommand(macId, () => mac.launchApp(app))));
-    }
-  }
-
+  const steps = await Promise.all(
+    refs.cams.map((cam) =>
+      runStep(`canon.wake.${cam.id}`, () =>
+        applyCommand(cam.id, () => canon.setStandby(cam.ip, false)),
+      ),
+    ),
+  );
   res.json({ ok: steps.every((s) => s.ok), steps });
 });
 
@@ -191,6 +193,106 @@ router.post('/:roomId/stop-session', async (req, res) => {
 
   for (const cam of refs.cams) {
     steps.push(await runStep(`canon.release.${cam.id}`, () => canon.release(cam.id, cam.ip)));
+  }
+
+  res.json({ ok: steps.every((s) => s.ok), steps });
+});
+
+// Kill — emergency stop. Unconditionally tells every recorder/streamer in
+// the room to stop + releases camera claims, without asking the device what
+// it thinks its current state is. Safe to call even if nothing is recording
+// (stops are idempotent). Use this when the UI's REC/STOP toggle can't
+// help — e.g. the DAW is recording but the Pearl never started, so the
+// session bar thinks nothing is live.
+router.post('/:roomId/kill', async (req, res) => {
+  const refs = resolveStudio(req.params.roomId);
+  if (!refs) return res.status(404).json({ error: 'room not found' });
+  const steps: StepResult[] = [];
+
+  if (refs.pearl) {
+    const pearlId = refs.pearl.id;
+    const pearlHost = refs.pearl.ip;
+    // Stop publishers first so the stream flushes before the encoder goes idle.
+    for (const pub of refs.pearl.publishers) {
+      steps.push(await runStep(`pearl.publisher.stop.${pub.id}`, () =>
+        applyCommand(pearlId, () => pearl.stopPublisher(pearlHost, pub.channelId, pub.id)),
+      ));
+    }
+    steps.push(await runStep('pearl.record-all.stop', () =>
+      applyCommand(pearlId, () => pearl.stopAllRecorders(pearlHost)),
+    ));
+  }
+
+  if (refs.daw) {
+    const dawId = refs.daw.id;
+    steps.push(await runStep('daw.record-stop', async () => {
+      sendDawCommand(dawId, 'record-stop'); // best-effort; no-op if sidecar offline
+    }));
+  }
+
+  // Release PTZ so a subsequent operator can take control.
+  const releaseSteps = await Promise.all(
+    refs.cams.map((cam) =>
+      runStep(`canon.release.${cam.id}`, () => canon.release(cam.id, cam.ip)),
+    ),
+  );
+  steps.push(...releaseSteps);
+
+  res.json({ ok: steps.every((s) => s.ok), steps });
+});
+
+// Room Off — single destructive button that parks the whole studio:
+//   1. Stops any active Pearl recordings/publishers + DAW recording
+//   2. Puts each Canon camera in standby (low-power)
+//   3. Shuts the Pearl down via /system/control/shutdown
+//      — Pearl will NOT come back on its own; someone has to press the
+//        physical power button on the front of the device. This matches
+//        what the UI confirm() warns about.
+router.post('/:roomId/room-off', async (req, res) => {
+  const refs = resolveStudio(req.params.roomId);
+  if (!refs) return res.status(404).json({ error: 'room not found' });
+  const steps: StepResult[] = [];
+
+  // Stop any in-flight recording/stream first so we don't lose the tail.
+  if (refs.pearl) {
+    const pearlId = refs.pearl.id;
+    const pearlHost = refs.pearl.ip;
+    for (const pub of refs.pearl.publishers) {
+      steps.push(
+        await runStep(`pearl.publisher.stop.${pub.id}`, () =>
+          applyCommand(pearlId, () => pearl.stopPublisher(pearlHost, pub.channelId, pub.id)),
+        ),
+      );
+    }
+    steps.push(await runStep('pearl.record-all.stop', () =>
+      applyCommand(pearlId, () => pearl.stopAllRecorders(pearlHost)),
+    ));
+  }
+  if (refs.daw) {
+    const dawId = refs.daw.id;
+    steps.push(await runStep('daw.record-stop', async () => {
+      sendDawCommand(dawId, 'record-stop'); // best-effort: no-op if sidecar offline
+    }));
+  }
+
+  // Cameras → standby (parallel; independent hosts).
+  const camSteps = await Promise.all(
+    refs.cams.map((cam) =>
+      runStep(`canon.standby.${cam.id}`, () =>
+        applyCommand(cam.id, () => canon.setStandby(cam.ip, true)),
+      ),
+    ),
+  );
+  steps.push(...camSteps);
+
+  // Pearl shutdown last — after it processes this, it's gone until someone
+  // presses the power button.
+  if (refs.pearl) {
+    const pearlId = refs.pearl.id;
+    const pearlHost = refs.pearl.ip;
+    steps.push(await runStep('pearl.shutdown', () =>
+      applyCommand(pearlId, () => pearl.shutdownSystem(pearlHost)),
+    ));
   }
 
   res.json({ ok: steps.every((s) => s.ok), steps });

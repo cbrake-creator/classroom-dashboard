@@ -188,6 +188,14 @@ export async function stopPublisher(host: string, channelId: number, publisherId
   log.info({ host, channelId, publisherId }, 'pearl publisher stop');
 }
 
+// Full system shutdown. The Pearl turns itself completely off — bringing it
+// back requires a physical press of the front-panel power button. Use this
+// as the last step of a "room off" sequence; never for a mid-session pause.
+export async function shutdownSystem(host: string): Promise<void> {
+  await client(host).post('/system/control/shutdown');
+  log.warn({ host }, 'pearl system shutdown issued — physical power button required to restart');
+}
+
 export async function setChannelLayout(host: string, channelId: number, layoutId: number): Promise<void> {
   await client(host).post(`/channels/${channelId}/layouts/${layoutId}/activate`);
   log.info({ host, channelId, layoutId }, 'pearl layout switch');

@@ -132,6 +132,65 @@ def find_input_device() -> Optional[int]:
     return None
 
 
+# ─── macOS microphone permission ─────────────────────────────
+# When launchd spawns the sidecar, CoreAudio silently returns zero buffers if
+# TCC hasn't granted microphone access — and launchd-spawned processes don't
+# automatically get a permission dialog. Explicitly asking via AVFoundation
+# forces macOS to render the prompt (and remembers the answer thereafter).
+def ensure_macos_mic_permission() -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        from AVFoundation import (  # type: ignore
+            AVCaptureDevice,
+            AVMediaTypeAudio,
+            AVAuthorizationStatusAuthorized,
+            AVAuthorizationStatusDenied,
+            AVAuthorizationStatusRestricted,
+        )
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory  # type: ignore
+        from Foundation import NSRunLoop, NSDate  # type: ignore
+    except ImportError as e:
+        log.info("pyobjc frameworks missing (%s) — skipping mic permission request", e)
+        return
+
+    status = AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio)
+    if status == AVAuthorizationStatusAuthorized:
+        log.info("mic permission: granted")
+        return
+    if status == AVAuthorizationStatusDenied:
+        log.error("mic permission: DENIED — grant it in System Settings → Privacy & Security → Microphone, then relaunch")
+        return
+    if status == AVAuthorizationStatusRestricted:
+        log.error("mic permission: restricted by policy")
+        return
+
+    # NotDetermined: TCC needs a running NSApplication to render the dialog.
+    # Without this, requestAccess silently auto-denies (we saw it return in
+    # ~5ms with no dialog on screen). Accessory activation policy keeps us
+    # out of the Dock while still having a valid UI context.
+    log.info("mic permission: not determined — requesting (dialog should appear)")
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+    done = threading.Event()
+    granted_flag = {"ok": False}
+    def _handler(granted):
+        granted_flag["ok"] = bool(granted)
+        done.set()
+    AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeAudio, _handler)
+
+    # Pump the NSApp run loop until the user answers (or a timeout fires). The
+    # dialog can't render if the main thread never yields to Cocoa.
+    deadline = time.time() + 60
+    while not done.is_set() and time.time() < deadline:
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+    if done.is_set():
+        log.info("mic permission: %s", "granted" if granted_flag["ok"] else "denied")
+    else:
+        log.warning("mic permission: request timed out after 60s (no dialog or no response?)")
+
+
 # ─── Recording state ─────────────────────────────────────────
 # One mono WAV per channel so a DAW that only imports stereo (GarageBand) can
 # still pull each mic into its own track. File naming: studio_<ts>/ch03-<strip>.wav
@@ -411,6 +470,11 @@ def record_heartbeat_loop() -> None:
 
 
 def main() -> int:
+    # Request mic access BEFORE opening any CoreAudio streams. When launchd
+    # starts us fresh, this is what triggers the on-screen TCC prompt; once
+    # the user approves, subsequent launches skip straight past this.
+    ensure_macos_mic_permission()
+
     idx = find_input_device()
     if idx is None:
         return 2

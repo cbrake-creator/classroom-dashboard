@@ -848,31 +848,65 @@
   .pearl-onetouch.recording .pearl-rec-time { color: var(--red); }
   .pearl-rec-sub { font-size: 11px; color: var(--text-muted); }
 
-  /* Single room-level REC button in the studio session bar. Starts/stops
-     Pearl + DAW in one click via /api/studio/<room>/start-session. */
-  .studio-rec-btn {
+  /* REC and STOP are sibling actions — same size/shape, different colors.
+     REC (green, filled) starts a session; STOP (red, filled) ends it.
+     While a session is live REC gets a soft pulse so you can see at a
+     glance that something is running. */
+  .studio-rec-btn, .studio-stop-btn {
     display: flex; align-items: center; justify-content: center; gap: 10px;
     min-width: 140px; height: 56px; padding: 0 22px;
-    background: #16a34a; color: #fff; border: none; border-radius: 8px;
+    color: #fff; border: none; border-radius: 8px;
     font-size: 18px; font-weight: 800; letter-spacing: 2px; cursor: pointer;
     transition: transform .08s, background .15s, box-shadow .2s;
     box-shadow: 0 2px 0 rgba(0,0,0,.25) inset;
   }
-  .studio-rec-btn:hover { background: #15803d; }
-  .studio-rec-btn:active { transform: translateY(1px); }
-  .studio-rec-btn.recording {
-    background: #dc2626;
-    box-shadow: 0 0 0 2px rgba(239,68,68,.6), 0 0 20px rgba(239,68,68,.4);
-    animation: pearl-rec-pulse 1.4s ease-in-out infinite;
+  .studio-rec-btn  { background: #16a34a; }
+  .studio-rec-btn:hover  { background: #15803d; }
+  .studio-stop-btn { background: #dc2626; }
+  .studio-stop-btn:hover { background: #b91c1c; }
+  .studio-rec-btn:active, .studio-stop-btn:active { transform: translateY(1px); }
+  /* Subtle pulse on REC while the session is live, to hint "something is running". */
+  .studio-rec-btn.active {
+    box-shadow: 0 0 0 2px rgba(22,163,74,.6), 0 0 20px rgba(22,163,74,.4);
+    animation: pearl-rec-pulse 1.6s ease-in-out infinite;
   }
+  /* Dot/square icons matching each button's semantic. */
   .studio-rec-dot {
     width: 14px; height: 14px; border-radius: 50%; background: #fff;
     box-shadow: 0 0 6px rgba(255,255,255,.6);
   }
-  .studio-rec-btn.recording .studio-rec-dot {
+  .studio-stop-square {
+    width: 14px; height: 14px; background: #fff; border-radius: 2px;
+  }
+  .studio-rec-btn.active .studio-rec-dot {
     animation: pearl-rec-dot-pulse 1s ease-in-out infinite;
   }
-  .studio-rec-label { font-family: 'SF Mono', monospace; }
+  .studio-rec-label, .studio-stop-label { font-family: 'SF Mono', monospace; }
+
+  /* Room Off — smaller, amber, destructive. Cameras → standby, Pearl shuts
+     down entirely (needs a physical power-button press to come back). */
+  .studio-shutdown-btn {
+    height: 56px; padding: 0 16px;
+    background: transparent; color: #d97706; border: 1px solid #d97706;
+    border-radius: 8px; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
+    cursor: pointer; transition: background .15s, color .15s;
+  }
+  .studio-shutdown-btn:hover { background: #d97706; color: #fff; }
+  .studio-shutdown-btn:active { transform: translateY(1px); }
+
+  /* Mirror of Studio Shutdown, but bringing things up. Blue/hollow so it
+     reads as constructive vs the amber destructive button next to it. */
+  .studio-prep-btn {
+    height: 56px; padding: 0 16px;
+    background: transparent; color: var(--blue); border: 1px solid var(--blue);
+    border-radius: 8px; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
+    cursor: pointer; transition: background .15s, color .15s;
+  }
+  .studio-prep-btn:hover { background: var(--blue); color: #fff; }
+  .studio-prep-btn:active { transform: translateY(1px); }
+
+  /* Stop-btn visuals live up top in the shared .studio-rec-btn/.studio-stop-btn
+     rule — matches REC exactly in size, shape, and typography. */
 
   .pearl-recordings {
     margin-top: 12px; padding: 10px 12px;
@@ -1753,10 +1787,21 @@ function getStudioSession(room) {
 function renderStudioSessionBar(room) {
   const sess = getStudioSession(room);
   const liveCls = sess.live ? 'live' : '';
-  const sessionPath = sess.live ? 'stop-session' : 'start-session';
   return `
     <div class="studio-session-bar ${liveCls}">
       <div class="studio-session-bar-left">
+        <button class="studio-rec-btn ${sess.live ? 'active' : ''}"
+                onclick="cmd('/api/studio/${room.id}/start-session')"
+                title="POST /api/studio/${room.id}/start-session">
+          <span class="studio-rec-dot"></span>
+          <span class="studio-rec-label">REC</span>
+        </button>
+        <button class="studio-stop-btn"
+                onclick="cmd('/api/studio/${room.id}/kill')"
+                title="POST /api/studio/${room.id}/kill — stop Pearl recorder/streams + DAW, release cameras.">
+          <span class="studio-stop-square"></span>
+          <span class="studio-stop-label">STOP</span>
+        </button>
         <div class="studio-live-dot"></div>
         <div>
           <div class="studio-session-title">${sess.label}</div>
@@ -1764,9 +1809,15 @@ function renderStudioSessionBar(room) {
         </div>
       </div>
       <div class="studio-session-actions">
-        <button class="studio-rec-btn ${sess.live ? 'recording' : ''}" onclick="cmd('/api/studio/${room.id}/${sessionPath}')" title="POST /api/studio/${room.id}/${sessionPath}">
-          <span class="studio-rec-dot"></span>
-          <span class="studio-rec-label">${sess.live ? 'STOP' : 'REC'}</span>
+        <button class="studio-prep-btn"
+                onclick="cmd('/api/studio/${room.id}/prep')"
+                title="POST /api/studio/${room.id}/prep — wake cameras, WOL the Pearl, launch Mac apps">
+          Prep Studio
+        </button>
+        <button class="studio-shutdown-btn"
+                onclick="confirmStudioShutdown('${room.id}', '${(room.name||'').replace(/'/g,'&#39;')}')"
+                title="POST /api/studio/${room.id}/room-off — cameras→standby + Pearl shutdown">
+          Studio Shutdown
         </button>
       </div>
     </div>
@@ -2787,6 +2838,23 @@ async function bootstrap() {
 
   // Live camera previews are now true MJPEG streams (multipart/x-mixed-replace),
   // so the browser handles per-frame updates — no JS polling needed.
+}
+
+// Studio Shutdown — park the whole room in one click. Gated behind a
+// browser confirm() because the Pearl shutdown requires a physical power
+// button press to reverse, so we don't want an accidental click during a
+// live session.
+function confirmStudioShutdown(roomId, roomName) {
+  const msg =
+    `Shut down ${roomName || roomId}?\n\n` +
+    `This will:\n` +
+    `  • Stop any active recording / stream\n` +
+    `  • Put all cameras in standby\n` +
+    `  • Power the Pearl OFF — it will need the physical power button\n` +
+    `    on the front of the Pearl to come back online.\n\n` +
+    `Continue?`;
+  if (!confirm(msg)) return;
+  cmd(`/api/studio/${roomId}/room-off`);
 }
 
 // Folder-picker modal. Opens from the "Browse…" button next to the DAW

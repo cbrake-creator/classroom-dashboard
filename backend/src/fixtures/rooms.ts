@@ -258,6 +258,9 @@ function makeFacultyPodcastStudio(): Room {
   // "TS25901165" instead of a friendly name, which is why it didn't show up
   // in the first "Pearl"-filtered scan.
   const pearl = makePearlStub('10.56.1.236', 'Faculty Podcast Pearl');
+  // Captured from ARP on the dashboard Mac; needed for Prep Studio's WOL.
+  // If the Pearl gets replaced, update this from: arp -an | grep 10.56.1.236
+  pearl.wolMac = '00:05:b7:f8:3c:ba';
 
   const mac: MacDevice = {
     id: 'mac-1',

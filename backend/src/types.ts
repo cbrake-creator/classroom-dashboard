@@ -148,6 +148,10 @@ export interface PearlDevice extends BaseDevice {
   type: 'pearl';
   apiBase: string;
   auth: BasicAuth;
+  // MAC address (colon or dash separated) used for Wake-on-LAN. Optional —
+  // WOL only works if the Pearl has it enabled in BIOS and we're on the
+  // same L2 broadcast domain. When absent, Prep skips the wake step.
+  wolMac?: string;
   firmware: string;
   cpu: number;
   temp: number;
