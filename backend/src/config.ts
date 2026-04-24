@@ -105,6 +105,20 @@ export const config = {
     username: envOptional('LOGI_LOCAL_USERNAME') ?? '',
     password: envOptional('LOGI_LOCAL_PASSWORD') ?? '',
   },
+
+  autoRecovery: {
+    enabledByDefault: (envOptional('AUTO_RECOVERY_ENABLED') ?? 'false').toLowerCase() === 'true',
+    hour: envNumber('AUTO_RECOVERY_HOUR', 5),
+    emailTo: envOptional('AUTO_RECOVERY_EMAIL_TO') ?? 'helpdesk@dts.edu',
+  },
+
+  smtp: {
+    host: envOptional('SMTP_HOST') ?? '',
+    port: envNumber('SMTP_PORT', 587),
+    user: envOptional('SMTP_USER') ?? '',
+    password: envOptional('SMTP_PASSWORD') ?? '',
+    from: envOptional('SMTP_FROM') ?? 'classroom-dashboard@dts.edu',
+  },
 };
 
 export type AppConfig = typeof config;

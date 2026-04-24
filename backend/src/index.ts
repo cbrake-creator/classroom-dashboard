@@ -21,12 +21,15 @@ import canonRouter from './routes/canon.js';
 import dawRouter from './routes/daw.js';
 import fsRouter from './routes/fs.js';
 import macRouter from './routes/mac.js';
+import autoRecoveryRouter from './routes/autoRecovery.js';
 import pearlRouter from './routes/pearl.js';
 import presetsRouter from './routes/presets.js';
 import roomsRouter from './routes/rooms.js';
+import uptimeRouter from './routes/uptime.js';
 import studioRouter from './routes/studio.js';
 import { startPolling, stopPolling } from './services/deviceManager.js';
 import * as logitechSync from './devices/logitechSync.js';
+import * as autoRecovery from './services/autoRecovery.js';
 import * as macClient from './devices/mac.js';
 import { initSocketServer } from './ws/socketServer.js';
 import { initSidecarNamespace } from './ws/sidecarServer.js';
@@ -60,6 +63,8 @@ app.use('/api/studio', studioRouter);
 app.use('/api/daw', dawRouter);
 app.use('/api/fs', fsRouter);
 app.use('/api/presets', presetsRouter);
+app.use('/api/uptime', uptimeRouter);
+app.use('/api/auto-recovery', autoRecoveryRouter);
 
 // Health probe — handy for systemd / nginx
 app.get('/healthz', (_req, res) => {
@@ -99,6 +104,9 @@ httpServer.listen(config.port, () => {
   // Logitech Sync Cloud poll loop (independent of the device-manager poll
   // since it has its own rate limit and runs less frequently).
   logitechSync.startPolling();
+  // Auto-recovery scheduler: starts unconditionally, but no-ops every
+  // fire if the persisted toggle (data/auto-recovery.json) says disabled.
+  autoRecovery.start();
 });
 
 // Graceful shutdown
@@ -106,6 +114,7 @@ function shutdown(signal: string): void {
   logger.info({ signal }, 'shutting down');
   stopPolling();
   logitechSync.stopPolling();
+  autoRecovery.stop();
   macClient.disconnect();
   httpServer.close(() => process.exit(0));
   // Hard-exit if close hangs

@@ -201,6 +201,21 @@ export async function setChannelLayout(host: string, channelId: number, layoutId
   log.info({ host, channelId, layoutId }, 'pearl layout switch');
 }
 
+// Soft reboot via Pearl's REST API. Endpoint name varies by firmware —
+// try the documented /system/reboot first, fall back to /system/restart.
+export async function softReboot(host: string): Promise<void> {
+  const c = client(host);
+  try {
+    await c.post('/system/reboot');
+    log.info({ host }, 'pearl reboot via /system/reboot');
+    return;
+  } catch {
+    /* fall through */
+  }
+  await c.post('/system/restart');
+  log.info({ host }, 'pearl reboot via /system/restart');
+}
+
 // ─── Archive (recorded files) ──────────────────────────────
 export interface PearlArchiveFile {
   id: string;           // Pearl's internal file id, URL-encoded into stream path

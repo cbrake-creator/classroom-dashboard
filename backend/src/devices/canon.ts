@@ -353,6 +353,17 @@ export async function getAutoTrackStatus(host: string): Promise<AutoTrackStatus>
   }
 }
 
+// Soft-reboot a Canon by cycling standby off→on with a brief gap. Used
+// by the auto-recovery scheduler. Doesn't fully power-cycle the cam (that
+// requires the physical button) but resets the WebView Livescope service
+// which clears most "stuck" states.
+export async function softReboot(host: string): Promise<void> {
+  await setStandby(host, true);   // sleep
+  await new Promise((r) => setTimeout(r, 5000));
+  await setStandby(host, false);  // wake
+  log.info({ host }, 'canon soft reboot complete');
+}
+
 // Toggle Canon Auto Tracking app (RA-AT001) via its /app_ctrl endpoint.
 // `update_config.cgi?trackingEnable=0|1` is live-effective AND survives
 // via an implicit save on the camera side (confirmed by reading back

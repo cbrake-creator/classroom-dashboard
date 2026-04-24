@@ -318,11 +318,21 @@
     border-radius: 50%;
   }
   .room-card-issues {
-    margin-top: 10px;
     font-size: 12px;
     font-weight: 600;
     color: var(--red);
   }
+  .room-card-footer {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-top: 10px; gap: 8px;
+  }
+  .room-card-uptime {
+    font-size: 11px; font-weight: 600; font-family: 'SF Mono', monospace;
+    margin-left: auto;
+  }
+  .uptime-good { color: var(--green); }
+  .uptime-warn { color: var(--yellow, #eab308); }
+  .uptime-bad { color: var(--red); }
 
   /* ── Back Button ── */
   .back-btn {
@@ -1534,6 +1544,8 @@ function renderRoomCard(room) {
   const health = getRoomHealth(room);
   const issues = getRoomIssueCount(room);
   const statusIcons = { green: '&#10003;', yellow: '&#9888;', red: '&#10007;' };
+  const uptime = uptimeByRoom.get(room.id);
+  const uptimeCls = uptime === undefined ? '' : uptime >= 99 ? 'uptime-good' : uptime >= 95 ? 'uptime-warn' : 'uptime-bad';
 
   return `
     <div class="room-card" onclick="openRoom('${room.id}')">
@@ -1550,10 +1562,26 @@ function renderRoomCard(room) {
           return `<div class="room-device-pip" style="background:${color}" title="${deviceTypeName(d.type)}: ${d.brand}"></div>`;
         }).join('')}
       </div>
-      ${issues > 0 ? `<div class="room-card-issues">${issues} issue${issues !== 1 ? 's' : ''}</div>` : ''}
+      <div class="room-card-footer">
+        ${issues > 0 ? `<span class="room-card-issues">${issues} issue${issues !== 1 ? 's' : ''}</span>` : '<span></span>'}
+        ${uptime !== undefined ? `<span class="room-card-uptime ${uptimeCls}" title="7-day uptime">${uptime.toFixed(1)}%</span>` : ''}
+      </div>
     </div>
   `;
 }
+
+// Uptime % per room — populated from /api/uptime, refreshed every 60s.
+const uptimeByRoom = new Map();
+async function refreshUptime() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/uptime`);
+    if (!res.ok) return;
+    const data = await res.json();
+    for (const r of data.rooms || []) uptimeByRoom.set(r.roomId, r.uptimePct);
+  } catch (err) { /* swallow */ }
+}
+refreshUptime();
+setInterval(refreshUptime, 60000);
 
 // ══════════════════════════════════════════════
 //  RENDER: ROOM DETAIL (Level 2)
@@ -3035,6 +3063,67 @@ function showToast(msg, kind) {
   host.appendChild(el);
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 4500);
 }
+
+// ── Auto-recovery admin panel ────────────────────────────
+// Tiny floating widget in bottom-left. Click to expand. Shows status,
+// last run, and a toggle button. Hidden behind a small icon when collapsed.
+async function renderAutoRecoveryPanel() {
+  let host = document.getElementById('auto-rec-panel');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'auto-rec-panel';
+    host.style.cssText = 'position:fixed;bottom:14px;left:14px;z-index:9998;font-family:-apple-system,sans-serif;font-size:12px;';
+    document.body.appendChild(host);
+  }
+  let status;
+  try {
+    status = await (await fetch(`${BACKEND_URL}/api/auto-recovery`)).json();
+  } catch { status = { enabled: false, lastRunAt: null, smtpConfigured: false }; }
+
+  const enabled = status.enabled;
+  const lastRun = status.lastRunAt ? new Date(status.lastRunAt).toLocaleString() : 'never';
+  const next = status.nextRunAt ? new Date(status.nextRunAt).toLocaleString() : '—';
+  const dot = enabled ? '#22c55e' : '#9ca3af';
+  const smtpBadge = status.smtpConfigured ? 'SMTP live' : 'log-only';
+  host.innerHTML = `
+    <details style="background:rgba(20,20,30,.92);color:#e5e7eb;border:1px solid #333;border-radius:8px;padding:6px 10px;backdrop-filter:blur(6px);">
+      <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;">
+        <span style="width:8px;height:8px;border-radius:50%;background:${dot};display:inline-block;"></span>
+        Auto-recovery: <strong>${enabled ? 'ON' : 'OFF'}</strong> · ${smtpBadge}
+      </summary>
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;min-width:280px;">
+        <div style="color:#9ca3af;">Last run: ${lastRun}</div>
+        <div style="color:#9ca3af;">Next run: ${next}</div>
+        ${status.lastRunSummary ? `
+          <div style="color:#9ca3af;">Last sweep: ${status.lastRunSummary.devicesChecked} checked, ${status.lastRunSummary.rebootAttempts.filter(a => a.recovered).length} recovered, ${status.lastRunSummary.emailsSent} email${status.lastRunSummary.emailsSent === 1 ? '' : 's'}</div>
+        ` : ''}
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <button onclick="toggleAutoRecovery()" style="flex:1;padding:6px;background:${enabled ? '#dc2626' : '#16a34a'};color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">${enabled ? 'Turn OFF' : 'Turn ON'}</button>
+          <button onclick="runAutoRecoveryNow()" style="flex:1;padding:6px;background:#374151;color:#fff;border:none;border-radius:4px;cursor:pointer;">Run now</button>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+async function toggleAutoRecovery() {
+  const r = await fetch(`${BACKEND_URL}/api/auto-recovery/toggle`, { method: 'POST' });
+  const data = await r.json();
+  showToast(data.enabled ? '✓ Auto-recovery ON' : '✓ Auto-recovery OFF', 'info');
+  renderAutoRecoveryPanel();
+}
+
+async function runAutoRecoveryNow() {
+  if (!confirm('Run auto-recovery sweep right now? This will attempt soft-reboots on any offline cameras and Pearls. Email is in log-only mode unless SMTP is configured.')) return;
+  showToast('Running auto-recovery sweep...', 'info');
+  const r = await fetch(`${BACKEND_URL}/api/auto-recovery/run-now`, { method: 'POST' });
+  const data = await r.json();
+  showToast(`✓ Sweep done: ${data.devicesChecked} devices, ${data.rebootAttempts.filter(a=>a.recovered).length} recovered`, 'info');
+  renderAutoRecoveryPanel();
+}
+
+renderAutoRecoveryPanel();
+setInterval(renderAutoRecoveryPanel, 30000);
 
 bootstrap();
 </script>

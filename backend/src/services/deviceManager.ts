@@ -30,6 +30,7 @@ import * as logiLocal from '../devices/logitechLocal.js';
 import { ping } from '../devices/pinger.js';
 import { getDevice, getState, patchDevice } from './roomState.js';
 import { broadcastDeviceUpdate, broadcastDeviceError } from '../ws/socketServer.js';
+import { recordStatus } from './uptimeTracker.js';
 
 const log = logger.child({ svc: 'deviceManager' });
 
@@ -300,12 +301,14 @@ async function pollDeviceRef(campusId: string, roomId: string, device: Device): 
       device.lastSeen = Date.now();
       failureCounts.delete(key);
       broadcastDeviceUpdate(campusId, roomId, device);
+      recordStatus({ campusId, roomId, deviceId: device.id, deviceType: device.type, status: device.status, lastError: device.lastError });
     } else if (config.deviceMode === 'live' && device.status !== 'unknown') {
       // No real client for this device type yet. Don't let the fixture's
       // default 'online' mislead the UI in live mode — show 'unknown'.
       device.status = 'unknown';
       device.lastSeen = Date.now();
       broadcastDeviceUpdate(campusId, roomId, device);
+      recordStatus({ campusId, roomId, deviceId: device.id, deviceType: device.type, status: device.status, lastError: device.lastError });
     }
   } catch (err) {
     const msg = (err as Error).message ?? 'unknown';
@@ -322,6 +325,7 @@ async function pollDeviceRef(campusId: string, roomId: string, device: Device): 
         device.lastError = msg;
         device.lastSeen = Date.now();
         broadcastDeviceUpdate(campusId, roomId, device);
+      recordStatus({ campusId, roomId, deviceId: device.id, deviceType: device.type, status: device.status, lastError: device.lastError });
       }
       broadcastDeviceError(campusId, roomId, device.id, msg);
     } else {
