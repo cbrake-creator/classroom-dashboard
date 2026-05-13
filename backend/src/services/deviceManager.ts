@@ -16,6 +16,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import type {
   CameraDevice,
+  DawDevice,
   Device,
   MacDevice,
   PearlDevice,
@@ -139,9 +140,22 @@ async function refreshDevice(device: Device): Promise<Partial<Device> | null> {
     case 'network-switch':
     case 'audio':
       return refreshViaPing(device);
+    case 'daw':
+      return refreshDaw(device);
     default:
       return null;
   }
+}
+
+// DAW status is push, not polled — the sidecar opens a Socket.IO connection
+// and the hello/disconnect handlers in sidecarServer maintain sidecarConnected.
+// All this poller does is mirror that boolean into the standard device.status
+// field so the rest of the UI (which keys off status) lights up correctly.
+async function refreshDaw(device: DawDevice): Promise<Partial<Device>> {
+  return {
+    status: device.sidecarConnected ? 'online' : 'offline',
+    lastError: device.sidecarConnected ? null : 'sidecar not connected',
+  } as Partial<Device>;
 }
 
 // Rally Bar: stack three data sources, best-to-fallback:

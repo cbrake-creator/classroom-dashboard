@@ -1,40 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- launchd config: auto-start the sidecar at login on the studio Mac.
-
-     Install:
-       cp com.dts.studio-daw-sidecar.plist ~/Library/LaunchAgents/
-       # Edit the copy to set the absolute path to daemon.py and to your venv python
-       launchctl load ~/Library/LaunchAgents/com.dts.studio-daw-sidecar.plist
-
-     Uninstall:
-       launchctl unload ~/Library/LaunchAgents/com.dts.studio-daw-sidecar.plist
--->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>com.dts.studio-daw-sidecar</string>
 
+  <!-- Direct invocation of the bundle's signed Mach-O main binary. We used to
+       go through `open -W -a` so LaunchServices would associate the running
+       process with the bundle for TCC, but that was a workaround for when the
+       bundle's main binary was a /bin/bash script (signed by Apple, not us).
+       With a real signed Mach-O at Contents/MacOS/StudioDAWSidecar, TCC
+       attributes the request to com.dts.studio-daw-sidecar by code signature
+       regardless of launch path — and direct invocation lets launchd see the
+       sidecar's actual exit code instead of `open`'s always-0. -->
   <key>ProgramArguments</key>
   <array>
-    <!-- EDIT these two paths for your install location -->
-    <string>/Users/studio/Projects/classroom-dashboard/sidecar/venv/bin/python</string>
-    <string>/Users/studio/Projects/classroom-dashboard/sidecar/daemon.py</string>
+    <string>/Users/greenteam/Applications/StudioDAWSidecar.app/Contents/MacOS/StudioDAWSidecar</string>
   </array>
-
-  <key>WorkingDirectory</key>
-  <string>/Users/studio/Projects/classroom-dashboard/sidecar</string>
 
   <key>RunAtLoad</key>
   <true/>
 
+  <!-- Boolean form: restart unconditionally unless we explicitly unload the
+       service (`launchctl unload` / `bootout`). This is what we want for a
+       headless capture daemon — any unintended exit (crash, signal, error
+       code, RØDECaster yanked + bug we didn't predict) brings it back. -->
   <key>KeepAlive</key>
   <true/>
 
-  <key>StandardOutPath</key>
-  <string>/Users/studio/Library/Logs/studio-daw-sidecar.log</string>
+  <!-- 10s minimum between launches so we don't tight-loop on a persistent
+       failure (e.g. RØDECaster removed and supervisor's own retries can't
+       recover). -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
 
+  <key>StandardOutPath</key>
+  <string>/Users/greenteam/Library/Logs/studio-daw-sidecar.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/studio/Library/Logs/studio-daw-sidecar.log</string>
+  <string>/Users/greenteam/Library/Logs/studio-daw-sidecar.err.log</string>
 </dict>
 </plist>

@@ -1052,6 +1052,14 @@
     border: 1px solid var(--border); border-radius: var(--radius-sm);
     font-size: 12px; margin-bottom: 12px;
   }
+  .daw-pill-row { display: inline-flex; gap: 6px; }
+  .daw-pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+    line-height: 1.4;
+  }
+  .daw-pill-error { background: var(--red); color: #fff; }
+  .daw-pill-warn  { background: #d97706; color: #fff; }
   .rcp-strip-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
   .rcp-strip {
     display: grid;
@@ -1249,12 +1257,30 @@ function findDeviceInConfig(campusId, roomId, deviceId) {
 }
 
 // True when the only change between `prev` and `next` is strips[].peakDb —
-// i.e. a live-meter tick that we can paint without a full re-render.
+// i.e. a live-meter tick that we can paint without a full re-render. Any
+// field that the DAW card visually displays must be in `scalars` so a
+// genuine change forces a full render and the UI doesn't lag behind state.
 function isDawLevelsOnlyPatch(prev, next) {
   if (!prev || !next || prev.type !== 'daw' || next.type !== 'daw') return false;
-  const scalars = ['status','sidecarConnected','sidecarVersion','captureDevice','sampleRate','monitoring','outputDir'];
+  const scalars = [
+    'status','sidecarConnected','sidecarVersion','captureDevice','sampleRate',
+    'monitoring','outputDir',
+    // Health fields rendered as red/orange pills in the connection bar.
+    // Without these, deviceState 'missing'→'present' (and the reverse) gets
+    // misclassified as a levels-only tick and the pill never clears — user
+    // sees "Capture device missing" until they manually refresh.
+    'micState','deviceState',
+  ];
   for (const k of scalars) if (prev[k] !== next[k]) return false;
   if (JSON.stringify(prev.recording||null) !== JSON.stringify(next.recording||null)) return false;
+  // Audio-stale pill: shown when lastPeakAgeMs > 5000 AND deviceState='present'.
+  // Treat it as "changed" only when the value crosses that threshold — otherwise
+  // every 2s health tick would force a full render (lastPeakAgeMs ticks up
+  // continuously).
+  const STALE_MS = 5000;
+  const prevStale = (prev.lastPeakAgeMs ?? 0) > STALE_MS;
+  const nextStale = (next.lastPeakAgeMs ?? 0) > STALE_MS;
+  if (prevStale !== nextStale) return false;
   const a = prev.strips || [], b = next.strips || [];
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -2380,11 +2406,41 @@ function renderDawBody(device) {
   // Map -60 dB → 0%, 0 dB → 100%. Values below -60 clamp to 0.
   const meterPct = p => (p == null) ? 0 : Math.max(0, Math.min(100, ((p + 60) / 60) * 100));
 
+  // Sidecar self-reported health. Empty string when healthy so the bar stays
+  // clean — only render badges when something needs attention.
+  const healthBadges = [];
+  if (sidecar) {
+    if (device.micState && device.micState !== 'granted' && device.micState !== 'n/a') {
+      healthBadges.push(`<span class="daw-pill daw-pill-error" title="Sidecar TCC microphone permission state">Mic ${device.micState}</span>`);
+    }
+    if (device.deviceState === 'missing') {
+      healthBadges.push(`<span class="daw-pill daw-pill-error" title="RØDECaster Pro II not enumerable from sounddevice — check USB">Capture device missing</span>`);
+    }
+    // Stale audio: sidecar is connected and device claims present, but no
+    // non-zero sample for >5s. Most likely a USB hiccup that hasn't tripped
+    // the supervisor's tear-down yet.
+    if (device.deviceState === 'present' && device.lastPeakAgeMs != null && device.lastPeakAgeMs > 5000) {
+      const sec = Math.round(device.lastPeakAgeMs / 1000);
+      healthBadges.push(`<span class="daw-pill daw-pill-warn" title="No audio samples for ${sec}s — capture stream may have stalled">Audio stale ${sec}s</span>`);
+    }
+  }
+  const badgesHtml = healthBadges.length ? `<span class="daw-pill-row">${healthBadges.join('')}</span>` : '';
+
+  // Recording error: pre-flight refusal (disk full, output dir not writable,
+  // can't open WAV writers, etc.) is sticky on `recording.error` until the
+  // next record-start attempt. Surface it in the Recording cell.
+  const recError = rec.error || null;
+  const recValue = recError
+    ? `<span title="${escapeAttr(recError)}">Error</span>`
+    : (rec.active ? '&#11044; REC ' + durStr : 'Idle');
+  const recCls = recError ? 'error' : (rec.active ? 'error' : '');
+
   return `
     <!-- Sidecar connection bar -->
     <div class="rcp-conn-bar">
       <div class="cam-session-dot" style="background: ${sidecar ? 'var(--green)' : 'var(--red)'}"></div>
       <span>${sidecar ? `Sidecar connected${device.sidecarVersion ? ' · v' + device.sidecarVersion : ''}` : 'Sidecar not connected — start studio-daw on the Mac'}</span>
+      ${badgesHtml}
       <span style="color:var(--text-muted); margin-left:auto;">${device.captureDevice || '—'} &middot; ${(device.sampleRate||0)/1000}kHz</span>
     </div>
 
@@ -2396,13 +2452,14 @@ function renderDawBody(device) {
       </div>
       <div class="metric-item">
         <div class="metric-label">Recording</div>
-        <div class="metric-value ${rec.active ? 'error' : ''}">${rec.active ? '&#11044; REC ' + durStr : 'Idle'}</div>
+        <div class="metric-value ${recCls}">${recValue}</div>
       </div>
       <div class="metric-item">
         <div class="metric-label">Monitor</div>
         <div class="metric-value ${device.monitoring ? 'ok' : ''}">${device.monitoring ? 'On' : 'Off'}</div>
       </div>
     </div>
+    ${recError ? `<div class="device-note" style="color:var(--red); font-size:11px;">Last record-start refused: ${escapeAttr(recError)}</div>` : ''}
 
     <!-- Output folder — where the sidecar writes one WAV per channel. -->
     <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:12px 0 6px;">Output Folder</div>
@@ -2417,6 +2474,11 @@ function renderDawBody(device) {
     <div class="device-note" style="font-size:10px;">
       Each channel is written to its own mono 24-bit WAV under a timestamped subfolder, so DAWs that don't import multichannel (GarageBand) can still pull each mic into a track.
     </div>
+
+    <!-- Recent Recordings: lists studio_<ts>/ session subdirs under outputDir.
+         Populated lazily on render via loadDawRecordings(). Refreshes when a
+         record-stop event lands (handler at the bottom of this file). -->
+    <div id="daw-recordings-${device.id}" class="pearl-recordings"></div>
 
     <!-- Live per-channel input levels (driven by sidecar 'levels' events) -->
     <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:12px 0 6px;">Input Levels</div>
@@ -2657,6 +2719,97 @@ function recorderNameShort(name) {
   return base.replace(/\s*Camera\s*$/i, '').trim() || base;
 }
 
+// ── DAW recordings list ──────────────────────────────────
+// Multitrack WAVs land in studio_<ts>/ subdirs of the sidecar's outputDir.
+// Backend route /api/daw/:id/recordings reads that dir; here we cache, render
+// a list grouped by session, and provide play/download per file.
+const dawRecList = new Map(); // deviceId -> { fetchedAt, sessions, outputDir }
+
+async function loadDawRecordings(deviceId, force) {
+  const cached = dawRecList.get(deviceId);
+  if (!force && cached && Date.now() - cached.fetchedAt < RECORDINGS_TTL_MS) {
+    return renderDawRecordings(deviceId);
+  }
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/daw/${deviceId}/recordings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    dawRecList.set(deviceId, {
+      fetchedAt: Date.now(),
+      sessions: data.sessions || [],
+      outputDir: data.outputDir || null,
+    });
+    renderDawRecordings(deviceId);
+  } catch (err) {
+    console.warn('failed to load DAW recordings', err);
+  }
+}
+
+function renderDawRecordings(deviceId) {
+  const host = document.getElementById(`daw-recordings-${deviceId}`);
+  if (!host) return;
+  const cached = dawRecList.get(deviceId);
+  const sessions = cached?.sessions || [];
+  if (sessions.length === 0) {
+    host.innerHTML = `
+      <div class="pearl-recordings-header">
+        <span class="pearl-recordings-title">&#9655; Recent Recordings</span>
+        <button class="pearl-rec-refresh" onclick="loadDawRecordings('${deviceId}', true)">&#8635; Refresh</button>
+      </div>
+      <div class="pearl-recordings-empty">No multitrack recordings yet. Hit REC to start.</div>`;
+    return;
+  }
+  const fileTotal = sessions.reduce((s, sess) => s + sess.files.length, 0);
+  host.innerHTML = `
+    <div class="pearl-recordings-header">
+      <span class="pearl-recordings-title">&#9655; Recent Recordings (${fileTotal} file${fileTotal === 1 ? '' : 's'} · ${sessions.length} session${sessions.length === 1 ? '' : 's'})</span>
+      <button class="pearl-rec-refresh" onclick="loadDawRecordings('${deviceId}', true)">&#8635; Refresh</button>
+    </div>
+    <div class="pearl-recordings-list">
+      ${sessions.slice(0, 6).map((sess) => `
+        <div class="pearl-session">
+          <div class="pearl-session-head">
+            <span class="pearl-session-when">${new Date(sess.createdMs).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+            <span class="pearl-session-meta">${formatHMS(sess.durationSec || 0)} · ${(sess.totalBytes / 1e6).toFixed(1)} MB · ${sess.files.length} track${sess.files.length === 1 ? '' : 's'}</span>
+          </div>
+          <div class="pearl-session-files">
+            ${sess.files.map((f) => {
+              const url = `${BACKEND_URL}/api/daw/${deviceId}/recordings/${encodeURIComponent(sess.name)}/${encodeURIComponent(f.name)}`;
+              const display = f.name.replace(/\.wav$/i, '');
+              return `
+                <button class="pearl-file-btn" onclick="playDawFile('${deviceId}', ${JSON.stringify(sess.name).replace(/"/g, '&quot;')}, ${JSON.stringify(f.name).replace(/"/g, '&quot;')})">
+                  &#9658; ${display}
+                </button>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
+function playDawFile(deviceId, sessionName, fileName) {
+  const url = `${BACKEND_URL}/api/daw/${deviceId}/recordings/${encodeURIComponent(sessionName)}/${encodeURIComponent(fileName)}`;
+  const dl  = `${url}?download=1`;
+  let modal = document.getElementById('pearl-player-modal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'pearl-player-modal';
+  modal.innerHTML = `
+    <div class="pearl-player-backdrop" onclick="this.parentElement.remove()"></div>
+    <div class="pearl-player-card">
+      <div class="pearl-player-head">
+        <span>${fileName.replace(/\.wav$/i, '')} <span style="color:var(--text-muted); font-size:11px; margin-left:8px;">${sessionName.replace(/^studio_/, '')}</span></span>
+        <button class="pearl-player-close" onclick="this.closest('#pearl-player-modal').remove()">&times;</button>
+      </div>
+      <audio controls autoplay src="${url}" style="width:100%;"></audio>
+      <div class="pearl-player-foot">
+        <a class="ctrl-btn ctrl-btn-blue" href="${dl}" download style="text-decoration:none;">&#11015; Download</a>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
 function playPearlFile(deviceId, recorderId, fileId, displayName) {
   const url = `${BACKEND_URL}/api/pearl/${deviceId}/recordings/${recorderId}/${fileId}/stream`;
   let modal = document.getElementById('pearl-player-modal');
@@ -2756,6 +2909,11 @@ function render() {
       const id = el.id.replace('pearl-recordings-', '');
       loadPearlRecordings(id, false);
     });
+    // Populate DAW recording lists for any DAW cards on screen.
+    document.querySelectorAll('[id^="daw-recordings-"]').forEach((el) => {
+      const id = el.id.replace('daw-recordings-', '');
+      loadDawRecordings(id, false);
+    });
   }, 80);
 }
 
@@ -2833,6 +2991,12 @@ async function bootstrap() {
 
     socket.on('device:update', ({ campusId, roomId, device }) => {
       const prev = findDeviceInConfig(campusId, roomId, device.id);
+      // Detect a recording stop — the just-finished session needs to appear in
+      // the Recent Recordings list without the user clicking Refresh. Force a
+      // cache bypass so the new dir shows up immediately.
+      if (device.type === 'daw' && prev?.recording?.active && !device.recording?.active) {
+        loadDawRecordings(device.id, true);
+      }
       if (patchDeviceInConfig(campusId, roomId, device)) {
         // Level-meter ticks arrive at 20 Hz. A full render() every time both
         // flickers the whole page and eats clicks on transient buttons (camera

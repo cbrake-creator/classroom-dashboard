@@ -238,6 +238,12 @@ export interface DawDevice extends BaseDevice {
   recording: DawRecordingState;
   monitoring: boolean;
   outputDir: string | null;        // folder where the sidecar writes per-channel WAVs
+  // Sidecar self-reported health, pushed every 2s. Lets the dashboard
+  // distinguish "sidecar online but mic blocked" from "sidecar offline" etc.
+  micState?: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown' | 'n/a';
+  deviceState?: 'present' | 'missing' | 'unknown';
+  lastPeakAgeMs?: number | null;   // ms since the last non-zero audio sample; null = never
+  recordingActive?: boolean;
 }
 
 // ─── Union ─────────────────────────────────────────────────
