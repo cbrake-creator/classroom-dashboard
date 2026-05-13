@@ -71,7 +71,7 @@ AVIO_HTTP_PORT = env_int("AVIO_HTTP_PORT", 3301)
 AVIO_FFMPEG_BIN = env("AVIO_FFMPEG_BIN",
                       str(Path(__file__).parent.parent / "bin" / "ffmpeg"))
 AVIO_AVFOUNDATION_INDEX = env("AVIO_AVFOUNDATION_INDEX", "0")  # `ffmpeg -list_devices` index
-AVIO_FRAMERATE = env_int("AVIO_FRAMERATE", 15)
+AVIO_FRAMERATE = env_int("AVIO_FRAMERATE", 30)
 AVIO_HEIGHT = env_int("AVIO_HEIGHT", 720)  # output height; width preserves aspect
 
 # Which channels to actually write to disk. Format: "<ch>:<name>,<ch>:<name>..."
@@ -949,10 +949,22 @@ import subprocess
 
 def _ffmpeg_base_args() -> list[str]:
     """Common avfoundation input args. Scale height with -2:HEIGHT so width
-    rounds to the nearest even number (yuv420p / mjpeg both need even dims)."""
+    rounds to the nearest even number (yuv420p / mjpeg both need even dims).
+
+    Low-latency tuning:
+      -fflags nobuffer     don't accumulate frames in ffmpeg's input buffer
+      -flags low_delay     hint to encoders/muxers to minimize internal lag
+      -probesize / -analyzeduration: drop ffmpeg's 5MB / 5s default input
+        probing — the AV.io is a known-fixed UYVY422 stream so we don't need
+        any of it. Saves ~1-2s of startup lag per request.
+    """
     return [
         AVIO_FFMPEG_BIN,
         "-nostdin", "-loglevel", "error", "-hide_banner",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-probesize", "32",
+        "-analyzeduration", "0",
         "-f", "avfoundation",
         "-framerate", str(AVIO_FRAMERATE),
         "-pixel_format", "uyvy422",   # AV.io 4K's native format; skip ffmpeg's yuv420p auto-pick that errors
@@ -1024,9 +1036,12 @@ class _AvioHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             # Pipe ffmpeg's stdout straight to the client until either side
-            # disconnects. 32 KB chunks balance latency vs syscall overhead.
+            # disconnects. 4 KB chunks ship sub-frame so the browser can start
+            # decoding before ffmpeg finishes flushing the next frame — keeps
+            # end-to-end latency under ~300ms instead of accumulating in our
+            # buffer. Tiny extra syscall load is fine on a single-stream box.
             while True:
-                chunk = proc.stdout.read(32 * 1024)
+                chunk = proc.stdout.read(4096)
                 if not chunk:
                     break
                 self.wfile.write(chunk)
