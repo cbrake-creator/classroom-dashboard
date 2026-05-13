@@ -373,6 +373,9 @@
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
     gap: 16px;
   }
+  /* AV.io capture preview spans every column — that's the "big preview
+     screen" replacing the three Canon tiles on the Faculty Podcast room. */
+  .device-card-wide { grid-column: 1 / -1; }
   .device-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -1437,7 +1440,8 @@ function deviceIcon(type) {
     pearl: '&#9210;',           // encoder/recorder
     mac: '&#63743;',            // mac (Apple logo PUA — falls back gracefully)
     rodecaster: '&#9836;',      // mixer
-    daw: '&#9835;'              // DAW / console
+    daw: '&#9835;',             // DAW / console
+    avio: '&#128249;'           // film camera — capture card / live preview
   };
   return icons[type] || '&#9679;';
 }
@@ -1446,7 +1450,8 @@ function deviceTypeName(type) {
   const names = {
     camera: 'Camera', nuc: 'Computer', 'network-switch': 'Switch', display: 'Display',
     'rally-bar': 'Rally Bar', tap: 'Tap Controller', sight: 'Sight Camera', audio: 'Audio',
-    pearl: 'Encoder', mac: 'Mac Studio', rodecaster: 'Mixer', daw: 'Studio DAW'
+    pearl: 'Encoder', mac: 'Mac Studio', rodecaster: 'Mixer', daw: 'Studio DAW',
+    avio: 'Capture'
   };
   return names[type] || type;
 }
@@ -1613,6 +1618,22 @@ setInterval(refreshUptime, 60000);
 //  RENDER: ROOM DETAIL (Level 2)
 // ══════════════════════════════════════════════
 
+// Per-room device ordering + filtering. The Faculty Podcast room replaces its
+// three Canon camera tiles with a single big AV.io capture-card preview
+// showing the Pearl's HDMI 1 program output — the cameras are still in the
+// fixture state (room-level multi-cam presets need them, and the Pearl HDMI
+// feed is composed from their inputs) but they're not rendered as cards.
+// Other rooms render every device.
+function orderedRoomDevices(room) {
+  let devs = room.devices;
+  if (room.id === 'faculty-podcast') {
+    devs = devs.filter(d => d.type !== 'camera');
+    // Float the AV.io tile to the top so it lands above Pearl / DAW / Mac.
+    devs.sort((a, b) => (a.type === 'avio' ? -1 : 0) - (b.type === 'avio' ? -1 : 0));
+  }
+  return devs;
+}
+
 function renderRoomDetail(roomId, viewChanged) {
   const campus = CONFIG.campuses.find(c => c.id === state.activeCampusId);
   const room = campus.rooms.find(r => r.id === roomId);
@@ -1631,7 +1652,7 @@ function renderRoomDetail(roomId, viewChanged) {
     ${room.type === 'studio' ? renderStudioSessionBar(room) : ''}
     ${room.type === 'studio' && room.devices.some(d => d.type === 'camera') ? `<div id="preset-panel-${room.id}"></div>` : ''}
     <div class="device-grid">
-      ${room.devices.map(d => renderDeviceCard(d)).join('')}
+      ${orderedRoomDevices(room).map(d => renderDeviceCard(d)).join('')}
     </div>
   `;
   // Room-level multi-cam preset panel: studios only (Faculty Podcast / Tech Talks).
@@ -1917,10 +1938,16 @@ function renderDeviceCard(device) {
     body = renderRodecasterBody(device);
   } else if (device.type === 'daw') {
     body = renderDawBody(device);
+  } else if (device.type === 'avio') {
+    body = renderAvioBody(device);
   }
 
+  // The AV.io capture-card preview should span the full row in the studio
+  // grid — it's the "big preview screen" replacing the three camera tiles.
+  const cardClass = device.type === 'avio' ? 'device-card device-card-wide' : 'device-card';
+
   return `
-    <div class="device-card" data-device-id="${device.id}">
+    <div class="${cardClass}" data-device-id="${device.id}">
       <div class="device-card-header">
         <div class="device-card-header-left">
           <div class="device-icon">${deviceIcon(device.type)}</div>
@@ -2500,6 +2527,38 @@ function renderDawBody(device) {
   `;
 }
 
+// ── AV.io 4K capture card ──────────────────────────────────
+// Big live preview of the Pearl's HDMI 1 program output. The MJPEG stream is
+// served by the sidecar's loopback HTTP, proxied through /api/avio/:id/mjpeg.
+// Uses the same persistent-<img> dance as Canon previews so device:update
+// rerenders don't tear down the ffmpeg subprocess (would cost a 2s rebuffer).
+function renderAvioBody(device) {
+  const online = device.sidecarReachable;
+  const snapshotUrl = `${BACKEND_URL}/api/avio/${device.id}/snapshot`;
+  const streamUrl   = `${BACKEND_URL}/api/avio/${device.id}/mjpeg`;
+  return `
+    <div class="avio-preview" style="position:relative; width:100%; background:#000; aspect-ratio:16/9; border-radius:6px; overflow:hidden;">
+      ${online ? `
+        <div class="cam-preview-slot" data-deviceid="${device.id}" data-stream-url="${streamUrl}" style="width:100%; height:100%;"></div>
+        <button class="cam-snapshot-btn" onclick="window.open('${snapshotUrl}', '_blank')" title="GET ${snapshotUrl}">&#128247; Snapshot</button>
+      ` : `
+        <div class="camera-feed-placeholder">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="5" width="15" height="14" rx="2"/>
+            <polygon points="22,7 17,12 22,17"/>
+          </svg>
+          <span>Sidecar unreachable — capture daemon not running</span>
+        </div>
+      `}
+    </div>
+    <div class="rcp-conn-bar" style="margin-top:8px;">
+      <div class="cam-session-dot" style="background: ${online ? 'var(--green)' : 'var(--red)'}"></div>
+      <span>${online ? 'Capture online' : 'Sidecar offline'}</span>
+      <span style="color:var(--text-muted); margin-left:auto;">${device.sourceLabel || '—'} &middot; via ${device.sidecarHost}</span>
+    </div>
+  `;
+}
+
 function renderSimpleDeviceBody(device) {
   const metrics = [];
   const health = device.healthStatus; // populated from Logitech Sync when available
@@ -2849,7 +2908,11 @@ function attachPersistentCamImgs() {
       img.className = 'cam-preview';
       img.alt = 'Live preview';
       img.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#000;';
-      img.src = `${BACKEND_URL}/api/canon/${id}/mjpeg`;
+      // Slot can override the stream URL via data-stream-url (used by the
+      // AV.io capture-card tile to point at /api/avio/<id>/mjpeg instead of
+      // the Canon endpoint). Default keeps the Canon behavior so existing
+      // camera cards continue to work unchanged.
+      img.src = slot.dataset.streamUrl || `${BACKEND_URL}/api/canon/${id}/mjpeg`;
       img.onerror = () => {
         img.style.display = 'none';
         const ph = img.nextElementSibling;

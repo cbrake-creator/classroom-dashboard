@@ -6,16 +6,20 @@
   <key>CFBundleIdentifier</key>           <string>com.dts.studio-daw-sidecar</string>
   <key>CFBundleName</key>                 <string>Studio DAW Sidecar</string>
   <key>CFBundleDisplayName</key>          <string>Studio DAW Sidecar</string>
-  <key>CFBundleShortVersionString</key>   <string>1.1</string>
-  <key>CFBundleVersion</key>              <string>2</string>
+  <key>CFBundleShortVersionString</key>   <string>1.2</string>
+  <key>CFBundleVersion</key>              <string>3</string>
   <key>CFBundlePackageType</key>          <string>APPL</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>LSMinimumSystemVersion</key>       <string>12.0</string>
   <!-- UIElement (Accessory): no Dock icon, no Cmd-Tab, but still a UI process
        so macOS will surface the microphone-permission dialog. -->
   <key>LSUIElement</key>                  <true/>
-  <!-- Required for TCC. Without this key, requestAccess auto-denies. -->
+  <!-- Required for TCC. Without each key, requestAccess auto-denies. -->
   <key>NSMicrophoneUsageDescription</key>
   <string>Studio DAW needs access to the RØDECaster Pro II to meter and record the multi-track mic feed.</string>
+  <!-- Camera access is for the AV.io 4K capture card — the sidecar relays
+       the Pearl's HDMI 1 program output as MJPEG to the dashboard. -->
+  <key>NSCameraUsageDescription</key>
+  <string>Studio DAW needs access to the AV.io 4K capture card so the classroom dashboard can show the live HDMI 1 program output from the Epiphan Pearl.</string>
 </dict>
 </plist>

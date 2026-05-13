@@ -16,12 +16,14 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import type {
   CameraDevice,
+  CaptureCardDevice,
   DawDevice,
   Device,
   MacDevice,
   PearlDevice,
   RodecasterDevice,
 } from '../types.js';
+import * as avio from '../devices/avio.js';
 import * as pearl from '../devices/pearl.js';
 import * as canon from '../devices/canon.js';
 import * as mac from '../devices/mac.js';
@@ -142,9 +144,24 @@ async function refreshDevice(device: Device): Promise<Partial<Device> | null> {
       return refreshViaPing(device);
     case 'daw':
       return refreshDaw(device);
+    case 'avio':
+      return refreshAvio(device);
     default:
       return null;
   }
+}
+
+// Capture-card refresh: just probe the sidecar's /healthz. Doing a real
+// snapshot here would burn ~2s per poll cycle and pin the AV.io device,
+// blocking the dashboard's live MJPEG viewers. Signal-present detection
+// happens lazily when someone actually requests a snapshot.
+async function refreshAvio(device: CaptureCardDevice): Promise<Partial<Device>> {
+  const reachable = await avio.probeReachable(device.sidecarHost);
+  return {
+    status: reachable ? 'online' : 'offline',
+    sidecarReachable: reachable,
+    lastError: reachable ? null : 'sidecar HTTP server not reachable',
+  } as Partial<Device>;
 }
 
 // DAW status is push, not polled — the sidecar opens a Socket.IO connection

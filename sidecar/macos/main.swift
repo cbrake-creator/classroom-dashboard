@@ -46,34 +46,43 @@ let log: (String) -> Void = { msg in
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-// 2. Request mic access (or skip if we already have it).
-let status = AVCaptureDevice.authorizationStatus(for: .audio)
-log("mic auth status on entry: \(status.rawValue)")
-
-if status == .notDetermined {
-    log("requesting mic access — dialog should appear")
+// 2. Request mic + camera access (or skip what we already have).
+//    Mic is for the RØDECaster Pro II multitrack capture; camera is for the
+//    AV.io 4K capture card relaying the Pearl's HDMI 1 program output.
+//    Both run inside the same Python daemon downstream so they share this
+//    bundle's TCC identity (com.dts.studio-daw-sidecar). On a first-time
+//    install the user clicks Allow twice; subsequent launches skip both.
+func requestAccess(for mediaType: AVMediaType, label: String) {
+    let status = AVCaptureDevice.authorizationStatus(for: mediaType)
+    log("\(label) auth status on entry: \(status.rawValue)")
+    if status == .authorized {
+        log("\(label) already granted — skipping prompt")
+        return
+    }
+    if status == .denied || status == .restricted {
+        log("\(label) access \(status == .denied ? "denied" : "restricted") — capture path will fail until re-granted in System Settings")
+        return
+    }
+    log("requesting \(label) access — dialog should appear")
     let sem = DispatchSemaphore(value: 0)
     var granted = false
-    AVCaptureDevice.requestAccess(for: .audio) { ok in
+    AVCaptureDevice.requestAccess(for: mediaType) { ok in
         granted = ok
         sem.signal()
     }
-    // Pump the main run loop so the dialog can render. Without this, the
-    // completion handler fires immediately with denied=true.
     let deadline = Date().addingTimeInterval(120)
     while sem.wait(timeout: .now() + .milliseconds(50)) == .timedOut {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         if Date() > deadline {
-            log("mic access request timed out after 120s")
+            log("\(label) access request timed out after 120s")
             break
         }
     }
-    log("mic access result: \(granted ? "granted" : "denied")")
-} else if status == .authorized {
-    log("mic already granted — skipping prompt")
-} else {
-    log("mic access \(status == .denied ? "denied" : "restricted") — sidecar will run with zero buffers")
+    log("\(label) access result: \(granted ? "granted" : "denied")")
 }
+
+requestAccess(for: .audio, label: "mic")
+requestAccess(for: .video, label: "camera")
 
 // 3. exec the Python wrapper. It lives in Contents/Resources/ so it isn't
 //    mistaken for a second main binary.

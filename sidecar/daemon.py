@@ -61,6 +61,19 @@ if not OUTPUT_DIR.is_absolute():
 LEVELS_HZ = env_int("LEVELS_HZ", 20)
 LOG_LEVEL = env("LOG_LEVEL", "info").upper()
 
+# ── AV.io 4K capture (HDMI 1 program output from the Epiphan Pearl) ──
+# The sidecar's TCC bundle has NSCameraUsageDescription so ffmpeg subprocesses
+# launched from this daemon inherit camera access via the bundle's identity.
+# That's the whole reason the AV.io capture lives here instead of in the
+# backend — the backend runs under launchd without bundle-scoped TCC, so any
+# ffmpeg it spawned directly would silently hang on AVFoundation device access.
+AVIO_HTTP_PORT = env_int("AVIO_HTTP_PORT", 3301)
+AVIO_FFMPEG_BIN = env("AVIO_FFMPEG_BIN",
+                      str(Path(__file__).parent.parent / "bin" / "ffmpeg"))
+AVIO_AVFOUNDATION_INDEX = env("AVIO_AVFOUNDATION_INDEX", "0")  # `ffmpeg -list_devices` index
+AVIO_FRAMERATE = env_int("AVIO_FRAMERATE", 15)
+AVIO_HEIGHT = env_int("AVIO_HEIGHT", 720)  # output height; width preserves aspect
+
 # Which channels to actually write to disk. Format: "<ch>:<name>,<ch>:<name>..."
 # where <ch> is the 1-based channel number and <name> is the filename stem.
 # If empty, the sidecar writes one WAV per channel (all CHANNELS channels).
@@ -923,6 +936,136 @@ def audio_supervisor_loop() -> None:
                 partial_state_since = None
 
 
+# ─── AV.io HTTP server ─────────────────────────────────────
+# The sidecar runs a small loopback HTTP server alongside the audio supervisor.
+# The backend (running under launchd, without bundle-scoped TCC) proxies its
+# /api/avio/* routes to this localhost server. ffmpeg is spawned per request as
+# a subprocess of this daemon, so it inherits the bundle's camera permission via
+# TCC responsibility — which is the whole reason this lives in the sidecar at all.
+import http.server
+import socketserver
+import subprocess
+
+
+def _ffmpeg_base_args() -> list[str]:
+    """Common avfoundation input args. Scale height with -2:HEIGHT so width
+    rounds to the nearest even number (yuv420p / mjpeg both need even dims)."""
+    return [
+        AVIO_FFMPEG_BIN,
+        "-nostdin", "-loglevel", "error", "-hide_banner",
+        "-f", "avfoundation",
+        "-framerate", str(AVIO_FRAMERATE),
+        "-pixel_format", "uyvy422",   # AV.io 4K's native format; skip ffmpeg's yuv420p auto-pick that errors
+        "-i", AVIO_AVFOUNDATION_INDEX,
+        "-vf", f"scale=-2:{AVIO_HEIGHT}",
+    ]
+
+
+class _AvioHandler(http.server.BaseHTTPRequestHandler):
+    # Silence per-request stdout noise; we log from the daemon's logger.
+    def log_message(self, fmt: str, *args) -> None:
+        log.debug("avio-http %s - %s", self.address_string(), fmt % args)
+
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/healthz":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok\n")
+            return
+        if path == "/avio/snapshot":
+            self._serve_snapshot()
+            return
+        if path == "/avio/mjpeg":
+            self._serve_mjpeg()
+            return
+        self.send_error(404, "unknown path")
+
+    def _serve_snapshot(self) -> None:
+        cmd = _ffmpeg_base_args() + [
+            "-frames:v", "1", "-q:v", "5",
+            "-f", "image2", "pipe:1",
+        ]
+        try:
+            # 8s budget: AVFoundation device open + first-frame negotiation
+            # takes ~2-4s on this hardware; pad for hiccups.
+            proc = subprocess.run(cmd, capture_output=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            self.send_error(504, "ffmpeg timeout (camera permission? capture device unplugged?)")
+            return
+        if proc.returncode != 0 or len(proc.stdout) < 16:
+            err = proc.stderr.decode("utf-8", errors="replace")[:200] if proc.stderr else "no output"
+            log.warning("avio snapshot ffmpeg failed rc=%d: %s", proc.returncode, err)
+            self.send_error(503, f"capture failed: {err}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(proc.stdout)))
+        self.end_headers()
+        self.wfile.write(proc.stdout)
+
+    def _serve_mjpeg(self) -> None:
+        # mpjpeg muxer emits a proper multipart/x-mixed-replace stream that
+        # browser <img> can render in real time. Boundary tag defaults to
+        # "ffmpeg"; advertise it in the Content-Type so the client parses
+        # part boundaries correctly.
+        cmd = _ffmpeg_base_args() + [
+            "-q:v", "5",
+            "-f", "mpjpeg", "-boundary_tag", "ffmpeg-avio",
+            "pipe:1",
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", 'multipart/x-mixed-replace; boundary="ffmpeg-avio"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            # Pipe ffmpeg's stdout straight to the client until either side
+            # disconnects. 32 KB chunks balance latency vs syscall overhead.
+            while True:
+                chunk = proc.stdout.read(32 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            log.debug("avio mjpeg client disconnected: %s", e)
+        finally:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            except Exception:
+                pass
+
+
+class _ThreadedHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    # Threaded so a long-running /mjpeg stream doesn't block /snapshot or /healthz.
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def avio_http_server() -> None:
+    if not Path(AVIO_FFMPEG_BIN).is_file():
+        log.warning("avio: ffmpeg not found at %s — /api/avio routes will 503. "
+                    "Place a static ffmpeg there (see backend/bin/ffmpeg).", AVIO_FFMPEG_BIN)
+        # Still start the server so the backend gets a clean 503 instead of a
+        # connection refused, which is much easier to debug.
+    try:
+        server = _ThreadedHttpServer(("127.0.0.1", AVIO_HTTP_PORT), _AvioHandler)
+    except OSError as e:
+        log.error("avio: could not bind 127.0.0.1:%d (%s) — another sidecar instance running?",
+                  AVIO_HTTP_PORT, e)
+        return
+    log.info("avio: HTTP server listening on 127.0.0.1:%d (ffmpeg=%s)",
+             AVIO_HTTP_PORT, AVIO_FFMPEG_BIN)
+    server.serve_forever()
+
+
 def main() -> int:
     global mic_state
     mic_state = check_macos_mic_permission()
@@ -938,6 +1081,7 @@ def main() -> int:
     threading.Thread(target=levels_loop, daemon=True).start()
     threading.Thread(target=record_heartbeat_loop, daemon=True).start()
     threading.Thread(target=health_loop, daemon=True).start()
+    threading.Thread(target=avio_http_server, daemon=True).start()
 
     # Graceful shutdown: stop loops, close stream + recording + disconnect.
     def shutdown(*_):

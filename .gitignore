@@ -3,3 +3,7 @@ claude-memory/
 .claude-start.sh
 .DS_Store
 ._*
+# Static ffmpeg binary (~80MB) used by the sidecar for AV.io capture.
+# Install via: curl + extract from https://evermeet.cx/ffmpeg/ — see
+# sidecar/macos/build_bundle.sh for the expected path.
+bin/ffmpeg

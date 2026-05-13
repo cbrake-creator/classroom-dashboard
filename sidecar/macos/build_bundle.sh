@@ -47,8 +47,9 @@ echo "==> verifying signature"
 codesign -dvv "$APP" 2>&1 | grep -E '^(Identifier|Signature|Format|Sealed)' || true
 
 if [[ $RESET_TCC -eq 1 ]]; then
-  echo "==> resetting TCC microphone permission for com.dts.studio-daw-sidecar"
+  echo "==> resetting TCC microphone + camera permission for com.dts.studio-daw-sidecar"
   tccutil reset Microphone com.dts.studio-daw-sidecar || true
+  tccutil reset Camera     com.dts.studio-daw-sidecar || true
 fi
 
 echo "==> done. Launch with:  open '$APP'"

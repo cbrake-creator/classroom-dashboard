@@ -246,6 +246,27 @@ export interface DawDevice extends BaseDevice {
   recordingActive?: boolean;
 }
 
+// ─── AV.io 4K capture card (Epiphan HDMI→USB) ─────────────
+// Plugged into the studio Mac via USB. Captures the Pearl 2's HDMI 1 program
+// output. The sidecar (running in a TCC-blessed bundle) serves an MJPEG
+// stream + snapshots over loopback HTTP; the backend proxies to it. Lives
+// alongside the DAW because both share the same bundle's camera+mic TCC.
+export interface CaptureCardDevice extends BaseDevice {
+  type: 'avio';
+  // Where the sidecar's HTTP server listens. Backend proxies /api/avio/:id/*
+  // to here; the dashboard never talks to this address directly.
+  sidecarHost: string;       // e.g. '127.0.0.1:3301'
+  // Whether the sidecar is reachable AND ffmpeg is present. Doesn't tell us
+  // whether HDMI 1 is actually emitting signal — that requires either a
+  // separate Pearl encoder-state check or a snapshot probe.
+  sidecarReachable: boolean;
+  // Last snapshot probe result. Set by deviceManager when refreshDevice runs.
+  signalPresent: boolean;
+  lastFrameAt: number | null; // epoch ms of last successful snapshot probe
+  // Cosmetic: how the source is labelled to the user.
+  sourceLabel: string;       // e.g. 'Pearl HDMI 1 (Program)'
+}
+
 // ─── Union ─────────────────────────────────────────────────
 export type Device =
   | CameraDevice
@@ -259,7 +280,8 @@ export type Device =
   | PearlDevice
   | MacDevice
   | RodecasterDevice
-  | DawDevice;
+  | DawDevice
+  | CaptureCardDevice;
 
 // ─── Rooms / campuses ──────────────────────────────────────
 export type RoomType = 'classroom' | 'conference' | 'studio';
