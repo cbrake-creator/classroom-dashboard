@@ -2625,33 +2625,60 @@ async function setAvioSource(deviceId, sourceId) {
 // persistent-<img> cache — but each poll is a fresh HTTP request against
 // the cached frame endpoint, so the <img> can't get into a "first-frame-
 // stuck" state like multipart/x-mixed-replace does.
-const avioImgCache = new Map();  // deviceId -> { img, interval }
-const AVIO_POLL_MS = 100;        // 10 FPS — matches the Pearl's program output cadence in practice
+const avioImgCache = new Map();  // deviceId -> { frontImg, backImg, interval, visible }
+const AVIO_POLL_MS = 17;          // ~60 FPS — matches the sidecar's AVIO_FRAMERATE default
+// Why 17ms not 16: setInterval drift means asking for 16 often delivers 15
+// or 17 anyway. 17 gives a steady cadence that browsers honor.
 
 function attachPersistentAvioImgs() {
   document.querySelectorAll('.avio-poll-slot').forEach((slot) => {
     const id = slot.dataset.deviceid;
     const url = slot.dataset.snapshotUrl;
     if (!id || !url) return;
+    slot.style.position = 'relative';   // absolute children fill the slot
     let entry = avioImgCache.get(id);
     if (!entry) {
-      const img = document.createElement('img');
-      img.className = 'avio-preview-img';
-      img.alt = 'Live preview';
-      img.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#000;';
-      // Use a 2-buffer swap pattern: keep two <img>s and alternate src loads
-      // so we never see a blank frame between snapshots. The "back" buffer
-      // preloads while the "front" is visible. Simple version first: just
-      // swap src on a single img — modern browsers double-buffer internally.
+      // Double-buffer: two stacked <img>s. The "loading" one fetches the
+      // next frame in the background; when its onload fires we flip
+      // opacities, making the freshly-decoded image visible in one paint
+      // tick (no half-decoded frame ever shows). At 60 Hz a single-<img>
+      // swap can briefly flash blank or partial content; this is what
+      // OBS/Chrome's <video> double-buffer behind the scenes too.
+      const makeImg = () => {
+        const img = document.createElement('img');
+        img.className = 'avio-preview-img';
+        img.alt = 'Live preview';
+        img.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; background:#000; transition: opacity 0s;';
+        return img;
+      };
+      const front = makeImg();
+      const back = makeImg();
+      front.style.opacity = '1';
+      back.style.opacity = '0';
+      const state = { front, back };
+      const swap = () => {
+        state.front.style.opacity = '0';
+        state.back.style.opacity = '1';
+        [state.front, state.back] = [state.back, state.front];
+      };
+      // Whenever the back buffer finishes loading, swap. Browser already
+      // has the decoded bitmap ready, so the swap is a single paint.
+      back.onload = swap;
+      front.onload = swap;  // first ever load also needs to flip
       const interval = setInterval(() => {
-        if (!img.isConnected) return;
-        img.src = `${url}?t=${Date.now()}`;
+        if (!front.isConnected) return;
+        // Write to whichever <img> is currently the back buffer.
+        state.back.src = `${url}?t=${Date.now()}`;
       }, AVIO_POLL_MS);
-      img.src = `${url}?t=${Date.now()}`;
-      entry = { img, interval };
+      // Kick the first load on the front buffer so something appears asap.
+      front.src = `${url}?t=${Date.now()}`;
+      entry = { state, interval, frontImg: front, backImg: back };
       avioImgCache.set(id, entry);
     }
-    if (entry.img.parentElement !== slot) slot.appendChild(entry.img);
+    if (entry.frontImg.parentElement !== slot) {
+      slot.appendChild(entry.frontImg);
+      slot.appendChild(entry.backImg);
+    }
   });
   // Clean up any cached entries whose slot is no longer in the DOM (room
   // navigated away). Stops the polling timer so we don't keep hitting the
@@ -2660,8 +2687,10 @@ function attachPersistentAvioImgs() {
   for (const [id, entry] of avioImgCache) {
     if (!visible.has(id)) {
       clearInterval(entry.interval);
-      entry.img.src = '';
-      entry.img.remove();
+      entry.frontImg.src = '';
+      entry.backImg.src = '';
+      entry.frontImg.remove();
+      entry.backImg.remove();
       avioImgCache.delete(id);
     }
   }

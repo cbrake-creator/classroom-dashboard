@@ -71,7 +71,7 @@ AVIO_HTTP_PORT = env_int("AVIO_HTTP_PORT", 3301)
 AVIO_FFMPEG_BIN = env("AVIO_FFMPEG_BIN",
                       str(Path(__file__).parent.parent / "bin" / "ffmpeg"))
 AVIO_AVFOUNDATION_INDEX = env("AVIO_AVFOUNDATION_INDEX", "0")  # `ffmpeg -list_devices` index
-AVIO_FRAMERATE = env_int("AVIO_FRAMERATE", 30)
+AVIO_FRAMERATE = env_int("AVIO_FRAMERATE", 60)
 AVIO_HEIGHT = env_int("AVIO_HEIGHT", 720)  # output height; width preserves aspect
 
 # Which channels to actually write to disk. Format: "<ch>:<name>,<ch>:<name>..."
