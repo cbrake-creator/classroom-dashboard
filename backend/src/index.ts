@@ -31,6 +31,7 @@ import studioRouter from './routes/studio.js';
 import { startPolling, stopPolling } from './services/deviceManager.js';
 import * as logitechSync from './devices/logitechSync.js';
 import * as autoRecovery from './services/autoRecovery.js';
+import * as go2rtcSupervisor from './services/go2rtcSupervisor.js';
 import * as macClient from './devices/mac.js';
 import { initSocketServer } from './ws/socketServer.js';
 import { initSidecarNamespace } from './ws/sidecarServer.js';
@@ -109,6 +110,10 @@ httpServer.listen(config.port, () => {
   // Auto-recovery scheduler: starts unconditionally, but no-ops every
   // fire if the persisted toggle (data/auto-recovery.json) says disabled.
   autoRecovery.start();
+  // go2rtc: child process that bridges the sidecar's RTSP push → WebRTC
+  // for the dashboard's AV.io live preview. Started here so its lifecycle
+  // follows the backend's launchd plist (no separate plist needed).
+  go2rtcSupervisor.start();
 });
 
 // Graceful shutdown
@@ -117,6 +122,7 @@ function shutdown(signal: string): void {
   stopPolling();
   logitechSync.stopPolling();
   autoRecovery.stop();
+  go2rtcSupervisor.stop();
   macClient.disconnect();
   httpServer.close(() => process.exit(0));
   // Hard-exit if close hangs

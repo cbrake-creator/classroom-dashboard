@@ -7,3 +7,8 @@ claude-memory/
 # Install via: curl + extract from https://evermeet.cx/ffmpeg/ — see
 # sidecar/macos/build_bundle.sh for the expected path.
 bin/ffmpeg
+
+# go2rtc binary (~18MB) — RTSP→WebRTC bridge for the AV.io capture card.
+# Install via download from https://github.com/AlexxIT/go2rtc/releases — see
+# README / INSTALL.md for the expected path.
+bin/go2rtc

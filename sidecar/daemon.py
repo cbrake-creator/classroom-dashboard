@@ -67,12 +67,22 @@ LOG_LEVEL = env("LOG_LEVEL", "info").upper()
 # That's the whole reason the AV.io capture lives here instead of in the
 # backend — the backend runs under launchd without bundle-scoped TCC, so any
 # ffmpeg it spawned directly would silently hang on AVFoundation device access.
+#
+# Architecture: ffmpeg captures from AV.io via AVFoundation and pushes the
+# encoded H.264 stream as RTSP to a local go2rtc instance. go2rtc translates
+# the RTSP stream into WebRTC (via WHEP) for the browser, which gives us
+# OBS-tier latency (~50-100ms end-to-end) with hardware H.264 decode in the
+# <video> element. The previous JPEG/HTTP-polling path was dropped because
+# Chrome dropped multipart/x-mixed-replace support in <img> and per-frame
+# HTTP polling capped latency at ~150-250ms.
 AVIO_HTTP_PORT = env_int("AVIO_HTTP_PORT", 3301)
 AVIO_FFMPEG_BIN = env("AVIO_FFMPEG_BIN",
                       str(Path(__file__).parent.parent / "bin" / "ffmpeg"))
 AVIO_AVFOUNDATION_INDEX = env("AVIO_AVFOUNDATION_INDEX", "0")  # `ffmpeg -list_devices` index
 AVIO_FRAMERATE = env_int("AVIO_FRAMERATE", 60)
 AVIO_HEIGHT = env_int("AVIO_HEIGHT", 720)  # output height; width preserves aspect
+AVIO_RTSP_URL = env("AVIO_RTSP_URL", "rtsp://127.0.0.1:8554/avio")
+AVIO_BITRATE_KBPS = env_int("AVIO_BITRATE_KBPS", 4000)
 
 # Which channels to actually write to disk. Format: "<ch>:<name>,<ch>:<name>..."
 # where <ch> is the 1-based channel number and <name> is the filename stem.
@@ -957,61 +967,50 @@ import subprocess
 
 
 def _ffmpeg_capture_args() -> list[str]:
-    """Args for the long-running capture subprocess. Emits a stream of JPEGs
-    (each delimited by SOI/EOI markers) to stdout via image2pipe — the reader
-    thread parses them.
+    """Args for the long-running capture subprocess. Encodes AV.io's UYVY422
+    feed as H.264 with VideoToolbox (Apple hardware encoder) and pushes the
+    stream over RTSP to a local go2rtc instance, which exposes it to the
+    browser as WebRTC.
 
-    Tried -fflags nobuffer / -flags low_delay / -probesize 32 — they made
-    AVFoundation stick on the first captured frame indefinitely (every output
-    JPEG was byte-identical to the first one, even though the source was live
-    and the same hardware works fine in Descript / OBS). Default ffmpeg
-    behavior with sensible -r throttling works correctly.
+    Low-latency tuning:
+      -g <fps>            keyframe every 1s for fast WebRTC connect-time
+      -bf 0               no B-frames (B-frames need future-frame context →
+                          enforced encode latency); WebRTC clients work better
+                          without them anyway
+      -realtime 1         VideoToolbox flag: encode in realtime mode, dropping
+                          quality before queuing frames
+      -allow_sw 1         fall back to software encode if VT unavailable
+      -rtsp_transport tcp localhost RTSP is reliable; UDP just complicates this
     """
     return [
         AVIO_FFMPEG_BIN,
         "-nostdin", "-loglevel", "error", "-hide_banner",
         "-f", "avfoundation",
         "-framerate", str(AVIO_FRAMERATE),
-        "-pixel_format", "uyvy422",   # AV.io 4K's native format; ffmpeg's auto-pick yuv420p errors
+        "-pixel_format", "uyvy422",   # AV.io 4K's native format; ffmpeg's yuv420p auto-pick errors
         "-i", AVIO_AVFOUNDATION_INDEX,
         "-vf", f"scale=-2:{AVIO_HEIGHT}",
-        # Cap output rate to the capture rate so we don't get a wall of
-        # duplicated frames flooding the pipe.
-        "-r", str(AVIO_FRAMERATE),
-        "-q:v", "5",
-        "-f", "image2pipe", "-vcodec", "mjpeg",
-        "pipe:1",
+        "-c:v", "h264_videotoolbox",
+        "-b:v", f"{AVIO_BITRATE_KBPS}k",
+        "-maxrate", f"{int(AVIO_BITRATE_KBPS * 1.25)}k",
+        "-bufsize", f"{AVIO_BITRATE_KBPS // 2}k",
+        "-g", str(AVIO_FRAMERATE),
+        "-bf", "0",
+        "-realtime", "1",
+        "-allow_sw", "1",
+        "-pix_fmt", "yuv420p",       # WebRTC requires 4:2:0 chroma
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        AVIO_RTSP_URL,
     ]
 
 
-# Latest JPEG frame from the continuous capture loop. The lock guards both
-# fields together; readers grab a snapshot of (jpeg, ts) without holding the
-# lock during the actual HTTP write.
-class _LatestFrame:
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.jpeg: bytes = b""
-        self.ts: float = 0.0
-
-    def set(self, jpeg: bytes) -> None:
-        now = time.time()
-        with self.lock:
-            self.jpeg = jpeg
-            self.ts = now
-
-    def get(self) -> tuple[bytes, float]:
-        with self.lock:
-            return self.jpeg, self.ts
-
-
-avio_latest = _LatestFrame()
-
 # Holds the currently-running ffmpeg subprocess so the /avio/restart HTTP
-# endpoint can kill it. Killing makes the capture loop's stdout read EOF,
-# the inner while exits, the outer while spins up a fresh ffmpeg. This is
+# endpoint can kill it. Killing makes the capture loop's wait() return, the
+# outer while spins up a fresh ffmpeg with a fresh RTSP push session. This is
 # the only known way to make AV.io re-negotiate its HDMI link after Pearl
-# changes the output source — without it, ffmpeg replays the pre-switch
-# buffered frames indefinitely.
+# changes the output source — without it, ffmpeg pushes pre-switch buffered
+# frames to go2rtc indefinitely.
 avio_proc_lock = threading.Lock()
 avio_proc: Optional[subprocess.Popen] = None
 
@@ -1033,9 +1032,12 @@ def avio_kick_capture() -> bool:
 
 
 def avio_capture_loop() -> None:
-    """Keep one ffmpeg subprocess running continuously, parse JPEGs out of its
-    stdout, and stash the most recent frame in `avio_latest`. Restart on any
-    failure with backoff (USB hot-plug, ffmpeg crash, source-switch kick, etc.)."""
+    """Keep one ffmpeg subprocess running continuously, pushing the AV.io
+    feed as RTSP to go2rtc. ffmpeg's stdout isn't read here — output goes
+    directly to go2rtc over the network. We just monitor that ffmpeg is
+    alive and respawn on failure (USB hot-plug, ffmpeg crash, source-switch
+    kick, go2rtc restart, etc.).
+    """
     global avio_proc
     if not Path(AVIO_FFMPEG_BIN).is_file():
         log.warning("avio: ffmpeg not found at %s — capture loop won't start", AVIO_FFMPEG_BIN)
@@ -1043,58 +1045,46 @@ def avio_capture_loop() -> None:
     backoff = 1.0
     while not shutdown_event.is_set():
         proc: Optional[subprocess.Popen] = None
+        started_at = time.time()
         try:
             cmd = _ffmpeg_capture_args()
-            log.info("avio: starting ffmpeg capture (target ~%d fps @ %dp)",
-                     AVIO_FRAMERATE, AVIO_HEIGHT)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            log.info("avio: starting ffmpeg → %s (%d fps @ %dp, %dk h264)",
+                     AVIO_RTSP_URL, AVIO_FRAMERATE, AVIO_HEIGHT, AVIO_BITRATE_KBPS)
+            # Drop stdout (we don't use it) but capture stderr for diagnostics
+            # on crash. stderr is read after exit so it doesn't block on the
+            # pipe filling up. With H.264 + RTSP push, ffmpeg's stderr is
+            # quiet unless something errors.
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, bufsize=0
+            )
             with avio_proc_lock:
                 avio_proc = proc
-            buf = bytearray()
-            frames_seen = 0
-            bytes_read = 0
-            last_log = time.time()
+            # Block until ffmpeg exits (crash, kick, or shutdown). Periodic
+            # check so the shutdown_event eventually wins.
             while not shutdown_event.is_set():
-                chunk = proc.stdout.read(16 * 1024)
-                if not chunk:
-                    log.warning("avio: ffmpeg stdout EOF after %d frames / %d bytes", frames_seen, bytes_read)
+                if proc.poll() is not None:
                     break
-                bytes_read += len(chunk)
-                buf.extend(chunk)
-                # Extract every complete JPEG (SOI=ff d8, EOI=ff d9). image2pipe
-                # concatenates them with no framing of its own — we parse the
-                # markers directly. Bounded buf size; if no EOI found, keep
-                # accumulating until one arrives.
-                while True:
-                    soi = buf.find(b"\xff\xd8")
-                    if soi < 0:
-                        buf.clear()  # garbage before any SOI — drop it
-                        break
-                    eoi = buf.find(b"\xff\xd9", soi + 2)
-                    if eoi < 0:
-                        # Incomplete frame; trim any pre-SOI noise and wait.
-                        if soi > 0:
-                            del buf[:soi]
-                        break
-                    avio_latest.set(bytes(buf[soi:eoi + 2]))
-                    frames_seen += 1
-                    del buf[:eoi + 2]
-                # Heartbeat every ~60s so we can confirm the loop is alive but
-                # don't spam the log file. Tracks md5 of latest frame so it's
-                # easy to spot if the capture has frozen vs the scene is just
-                # static (deterministic mjpeg encoder = identical bytes for
-                # identical pixels).
-                if time.time() - last_log > 60:
-                    h = hashlib.md5(avio_latest.jpeg).hexdigest()[:12] if avio_latest.jpeg else "(empty)"
-                    log.info("avio: capture heartbeat — %d frames, %.1f MB read, buf=%d, latest=%dB md5=%s",
-                             frames_seen, bytes_read / 1e6, len(buf), len(avio_latest.jpeg), h)
-                    last_log = time.time()
-            # ffmpeg exited (EOF on stdout). Read its stderr for diagnostics.
+                time.sleep(1)
+            exit_code = proc.poll()
+            uptime = time.time() - started_at
+            err_tail = ""
             if proc.stderr:
-                err = proc.stderr.read().decode("utf-8", errors="replace")
-                if err.strip():
-                    log.warning("avio: ffmpeg exited; stderr=%s", err[:300])
-            backoff = 1.0 if frames_seen > 5 else min(backoff * 1.5, 15.0)
+                try:
+                    err_tail = proc.stderr.read().decode("utf-8", errors="replace")[-400:]
+                except Exception:
+                    pass
+            if exit_code is None:
+                log.info("avio: ffmpeg still running after shutdown signal — terminating")
+            elif exit_code == -9 and uptime > 1.0:
+                # Killed by avio_kick_capture (source switch). Expected, quick respawn.
+                log.info("avio: ffmpeg killed after %.1fs uptime (likely source switch)", uptime)
+            else:
+                log.warning("avio: ffmpeg exited rc=%s after %.1fs; stderr tail=%s",
+                            exit_code, uptime, err_tail.strip()[:200])
+            # Quick respawn if ffmpeg was up for a while (means it was working;
+            # this restart is just a kick). Backoff if ffmpeg keeps failing at
+            # startup — go2rtc unreachable, AV.io unplugged, etc.
+            backoff = 1.0 if uptime > 5.0 else min(backoff * 1.5, 15.0)
         except Exception as e:
             log.warning("avio: capture loop error: %s", e)
             backoff = min(backoff * 1.5, 15.0)
@@ -1111,15 +1101,14 @@ def avio_capture_loop() -> None:
                     pass
         if shutdown_event.is_set():
             break
-        # If we just got many frames before the failure, restart aggressively.
-        # If we've been failing fast, back off so a missing AV.io doesn't
-        # thrash the system. A kick (avio_kick_capture) intentionally counts as
-        # a successful restart since we want fast turnaround for source changes.
         time.sleep(backoff)
 
 
 class _AvioHandler(http.server.BaseHTTPRequestHandler):
-    # Silence per-request stdout noise; we log from the daemon's logger.
+    # Sidecar's loopback HTTP server is now just a health probe + restart
+    # hook. Snapshots and MJPEG were retired when we switched to RTSP push +
+    # go2rtc/WebRTC — the dashboard hits go2rtc directly (proxied by the
+    # backend) for frames and live video.
     def log_message(self, fmt: str, *args) -> None:
         log.debug("avio-http %s - %s", self.address_string(), fmt % args)
 
@@ -1131,15 +1120,6 @@ class _AvioHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"ok\n")
             return
-        if path == "/avio/snapshot":
-            self._serve_snapshot()
-            return
-        # /avio/mjpeg kept for back-compat (existing route) but now also served
-        # by streaming cached frames in our own multipart format. Most clients
-        # should poll /snapshot instead.
-        if path == "/avio/mjpeg":
-            self._serve_mjpeg_from_cache()
-            return
         self.send_error(404, "unknown path")
 
     def do_POST(self) -> None:
@@ -1147,8 +1127,8 @@ class _AvioHandler(http.server.BaseHTTPRequestHandler):
         # POST /avio/restart — kill the running ffmpeg subprocess. The capture
         # loop's outer while spins it back up automatically. Used after Pearl
         # source changes to force AV.io to renegotiate the HDMI handshake;
-        # without this, ffmpeg keeps replaying its pre-switch buffered frames
-        # and the dashboard shows the old content indefinitely.
+        # without this, ffmpeg keeps pushing its pre-switch buffered frames
+        # to go2rtc and the dashboard shows the old content indefinitely.
         if path == "/avio/restart":
             killed = avio_kick_capture()
             self.send_response(200)
@@ -1157,53 +1137,6 @@ class _AvioHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'{"ok":true,"killed":' + (b'true' if killed else b'false') + b'}')
             return
         self.send_error(404, "unknown path")
-
-    def _serve_snapshot(self) -> None:
-        jpeg, ts = avio_latest.get()
-        if not jpeg:
-            self.send_error(503, "no frame available yet (capture loop starting?)")
-            return
-        # Stale = capture loop hasn't refreshed in >5s. Could be the AV.io was
-        # unplugged or ffmpeg died and is mid-restart. Surface as 503 so the
-        # dashboard's <img onerror> renders a placeholder.
-        age = time.time() - ts
-        if age > 5.0:
-            self.send_error(503, f"frame is {age:.1f}s stale — capture stalled")
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(jpeg)))
-        self.end_headers()
-        self.wfile.write(jpeg)
-
-    def _serve_mjpeg_from_cache(self) -> None:
-        # Multipart/x-mixed-replace built from the cached frame, refreshed at
-        # ~AVIO_FRAMERATE. Useful for non-browser tools and as a fallback.
-        # Dashboard clients should poll /snapshot for better cross-browser
-        # behavior.
-        boundary = b"--ffmpeg-avio"
-        self.send_response(200)
-        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=ffmpeg-avio")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        period = 1.0 / max(1, AVIO_FRAMERATE)
-        last_ts = 0.0
-        try:
-            while not shutdown_event.is_set():
-                jpeg, ts = avio_latest.get()
-                if jpeg and ts != last_ts:
-                    last_ts = ts
-                    self.wfile.write(boundary + b"\r\n")
-                    self.wfile.write(b"Content-Type: image/jpeg\r\n")
-                    self.wfile.write(f"Content-Length: {len(jpeg)}\r\n\r\n".encode())
-                    self.wfile.write(jpeg)
-                    self.wfile.write(b"\r\n")
-                    self.wfile.flush()
-                time.sleep(period)
-        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            log.debug("avio mjpeg client disconnected: %s", e)
 
 
 class _ThreadedHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):

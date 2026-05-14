@@ -45,13 +45,13 @@ router.get('/:deviceId/snapshot', async (req, res, next) => {
     const r = getCard(req.params.deviceId);
     if (!r.ok) return res.status(r.status).json({ error: r.error });
     try {
-      const buf = await avio.snapshot(r.card.sidecarHost);
+      const buf = await avio.snapshot('avio');
       res.setHeader('Content-Type', 'image/jpeg');
       res.setHeader('Cache-Control', 'no-store');
       res.send(buf);
     } catch (err) {
-      // Sidecar unreachable, ffmpeg error, no HDMI signal, etc. — surface
-      // a 503 so the <img onerror> handler renders a clean placeholder.
+      // go2rtc unreachable or no producer (sidecar ffmpeg down). Surface a
+      // 503 so the <img onerror> handler renders a clean placeholder.
       res.status(503).type('text/plain').send((err as Error).message);
     }
   } catch (err) {
@@ -59,10 +59,26 @@ router.get('/:deviceId/snapshot', async (req, res, next) => {
   }
 });
 
-router.get('/:deviceId/mjpeg', (req, res) => {
-  const r = getCard(req.params.deviceId);
-  if (!r.ok) return res.status(r.status).json({ error: r.error });
-  avio.pipeMjpeg(r.card.sidecarHost, res);
+// WebRTC SDP-offer/answer proxy — forwards { type:'offer', sdp } from the
+// browser to go2rtc's /api/webrtc endpoint and returns { type:'answer', sdp }.
+// Media flows directly browser ↔ go2rtc over ICE; this route is just the
+// signaling channel.
+router.post('/:deviceId/whep', async (req, res, next) => {
+  try {
+    const r = getCard(req.params.deviceId);
+    if (!r.ok) return res.status(r.status).json({ error: r.error });
+    const body = req.body;
+    if (!body || typeof body !== 'object' || typeof body.sdp !== 'string') {
+      return res.status(400).json({ error: 'expected { type, sdp } JSON body' });
+    }
+    const result = await avio.whepProxy('avio', { type: body.type ?? 'offer', sdp: body.sdp });
+    if (result.status !== 200 || !result.signal) {
+      return res.status(result.status || 502).json({ error: 'go2rtc webrtc proxy failed', raw: result.raw.slice(0, 200) });
+    }
+    res.json(result.signal);
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Current Pearl HDMI source mapping for this AV.io. Includes both the raw

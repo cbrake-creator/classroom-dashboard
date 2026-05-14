@@ -2547,6 +2547,7 @@ function renderDawBody(device) {
 function renderAvioBody(device) {
   const online = device.sidecarReachable;
   const snapshotUrl = `${BACKEND_URL}/api/avio/${device.id}/snapshot`;
+  const whepUrl     = `${BACKEND_URL}/api/avio/${device.id}/whep`;
   // Source switcher — current Pearl HDMI output mapping. The buttons drive
   // POST /api/avio/:id/source, which writes Pearl's outputs/<port>/settings
   // and kicks ffmpeg so AV.io renegotiates the HDMI link.
@@ -2575,7 +2576,7 @@ function renderAvioBody(device) {
     ${switcherHtml}
     <div class="avio-preview" style="position:relative; width:100%; background:#000; aspect-ratio:16/9; border-radius:6px; overflow:hidden;">
       ${online ? `
-        <div class="avio-poll-slot" data-deviceid="${device.id}" data-snapshot-url="${snapshotUrl}" style="width:100%; height:100%;"></div>
+        <div class="avio-whep-slot" data-deviceid="${device.id}" data-whep-url="${whepUrl}" style="width:100%; height:100%; position:relative;"></div>
         <button class="cam-snapshot-btn" onclick="window.open('${snapshotUrl}?t=' + Date.now(), '_blank')" title="GET ${snapshotUrl}">&#128247; Snapshot</button>
       ` : `
         <div class="camera-feed-placeholder">
@@ -2595,13 +2596,22 @@ function renderAvioBody(device) {
   `;
 }
 
-// Click handler for the source-switcher buttons. Optimistically clears the
-// current frame (so the user sees the switch is in progress) — the polling
-// timer will pick up the new content within a couple seconds.
+// Click handler for the source-switcher buttons. POSTs to /source, which
+// changes Pearl's output AND kicks the sidecar's ffmpeg. The kick tears
+// down the RTSP push to go2rtc, which causes our WebRTC connection to
+// disconnect — the auto-reconnect in startAvioWhep handles re-establishing
+// the stream once the new ffmpeg + RTSP session comes back (~1-2s).
 async function setAvioSource(deviceId, sourceId) {
-  const slot = document.querySelector(`.avio-poll-slot[data-deviceid="${deviceId}"]`);
-  const img = slot?.querySelector('img');
-  if (img) img.style.opacity = '0.4';
+  const slot = document.querySelector(`.avio-whep-slot[data-deviceid="${deviceId}"]`);
+  const video = slot?.querySelector('video');
+  if (video) video.style.opacity = '0.4';
+  // Proactively close the current WebRTC connection so we don't sit on a
+  // dead one while waiting for the reconnect timer.
+  const entry = avioWhepCache.get(deviceId);
+  if (entry?.pc) {
+    try { entry.pc.close(); } catch {}
+    entry.pc = null;
+  }
   try {
     const res = await fetch(`${BACKEND_URL}/api/avio/${deviceId}/source`, {
       method: 'POST',
@@ -2613,9 +2623,15 @@ async function setAvioSource(deviceId, sourceId) {
     console.warn('avio source switch failed', err);
     alert('Source switch failed: ' + (err.message || err));
   } finally {
-    // Restore opacity after a short delay — the next poll will fetch fresh
-    // content. ffmpeg takes ~1-2s to re-establish the AV.io session.
-    setTimeout(() => { if (img) img.style.opacity = '1'; }, 1500);
+    // attachPersistentAvioImgs re-checks for connections each render — and
+    // since we cleared entry.pc above, it'll spin up a fresh WHEP session
+    // automatically. Bring the opacity back after the typical reconnect time.
+    setTimeout(() => {
+      if (video) video.style.opacity = '1';
+      if (entry && !entry.pc && !entry.starting && entry.video.isConnected) {
+        startAvioWhep(entry).catch(() => {});
+      }
+    }, 1800);
   }
 }
 
@@ -2625,74 +2641,118 @@ async function setAvioSource(deviceId, sourceId) {
 // persistent-<img> cache — but each poll is a fresh HTTP request against
 // the cached frame endpoint, so the <img> can't get into a "first-frame-
 // stuck" state like multipart/x-mixed-replace does.
-const avioImgCache = new Map();  // deviceId -> { frontImg, backImg, interval, visible }
-const AVIO_POLL_MS = 17;          // ~60 FPS — matches the sidecar's AVIO_FRAMERATE default
-// Why 17ms not 16: setInterval drift means asking for 16 often delivers 15
-// or 17 anyway. 17 gives a steady cadence that browsers honor.
+// One active RTCPeerConnection per AV.io device. Survives device:update
+// rerenders the same way camImgCache does for Canon previews — the <video>
+// node gets reparented into the new slot without tearing down the WebRTC
+// session, so the dashboard's frequent full renders don't cause a fresh
+// SDP handshake + AV.io→ffmpeg→go2rtc startup every time.
+const avioWhepCache = new Map();   // deviceId -> { video, pc, whepUrl }
 
 function attachPersistentAvioImgs() {
-  document.querySelectorAll('.avio-poll-slot').forEach((slot) => {
+  document.querySelectorAll('.avio-whep-slot').forEach((slot) => {
     const id = slot.dataset.deviceid;
-    const url = slot.dataset.snapshotUrl;
-    if (!id || !url) return;
-    slot.style.position = 'relative';   // absolute children fill the slot
-    let entry = avioImgCache.get(id);
+    const whepUrl = slot.dataset.whepUrl;
+    if (!id || !whepUrl) return;
+    let entry = avioWhepCache.get(id);
     if (!entry) {
-      // Double-buffer: two stacked <img>s. The "loading" one fetches the
-      // next frame in the background; when its onload fires we flip
-      // opacities, making the freshly-decoded image visible in one paint
-      // tick (no half-decoded frame ever shows). At 60 Hz a single-<img>
-      // swap can briefly flash blank or partial content; this is what
-      // OBS/Chrome's <video> double-buffer behind the scenes too.
-      const makeImg = () => {
-        const img = document.createElement('img');
-        img.className = 'avio-preview-img';
-        img.alt = 'Live preview';
-        img.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; background:#000; transition: opacity 0s;';
-        return img;
-      };
-      const front = makeImg();
-      const back = makeImg();
-      front.style.opacity = '1';
-      back.style.opacity = '0';
-      const state = { front, back };
-      const swap = () => {
-        state.front.style.opacity = '0';
-        state.back.style.opacity = '1';
-        [state.front, state.back] = [state.back, state.front];
-      };
-      // Whenever the back buffer finishes loading, swap. Browser already
-      // has the decoded bitmap ready, so the swap is a single paint.
-      back.onload = swap;
-      front.onload = swap;  // first ever load also needs to flip
-      const interval = setInterval(() => {
-        if (!front.isConnected) return;
-        // Write to whichever <img> is currently the back buffer.
-        state.back.src = `${url}?t=${Date.now()}`;
-      }, AVIO_POLL_MS);
-      // Kick the first load on the front buffer so something appears asap.
-      front.src = `${url}?t=${Date.now()}`;
-      entry = { state, interval, frontImg: front, backImg: back };
-      avioImgCache.set(id, entry);
+      const video = document.createElement('video');
+      video.className = 'avio-preview-video';
+      video.autoplay = true;
+      video.muted = true;        // required for autoplay without user gesture
+      video.playsInline = true;
+      video.controls = false;
+      video.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#000;';
+      // The actual SDP handshake happens lazily once the <video> is attached.
+      entry = { video, pc: null, whepUrl, starting: false };
+      avioWhepCache.set(id, entry);
     }
-    if (entry.frontImg.parentElement !== slot) {
-      slot.appendChild(entry.frontImg);
-      slot.appendChild(entry.backImg);
+    if (entry.video.parentElement !== slot) slot.appendChild(entry.video);
+    // (Re)connect WebRTC if not already connected. The connection survives
+    // dashboard rerenders — the <video> just gets moved between slots.
+    if (!entry.pc && !entry.starting) {
+      startAvioWhep(entry).catch((err) => {
+        console.warn('avio WHEP connect failed', err);
+      });
     }
   });
-  // Clean up any cached entries whose slot is no longer in the DOM (room
-  // navigated away). Stops the polling timer so we don't keep hitting the
-  // backend after the user left the page.
-  const visible = new Set([...document.querySelectorAll('.avio-poll-slot')].map((s) => s.dataset.deviceid));
-  for (const [id, entry] of avioImgCache) {
+  // Clean up: device no longer rendered → tear down the peer connection so
+  // go2rtc can release its consumer slot.
+  const visible = new Set([...document.querySelectorAll('.avio-whep-slot')].map((s) => s.dataset.deviceid));
+  for (const [id, entry] of avioWhepCache) {
     if (!visible.has(id)) {
-      clearInterval(entry.interval);
-      entry.frontImg.src = '';
-      entry.backImg.src = '';
-      entry.frontImg.remove();
-      entry.backImg.remove();
-      avioImgCache.delete(id);
+      try { entry.pc?.close(); } catch {}
+      entry.video.srcObject = null;
+      entry.video.remove();
+      avioWhepCache.delete(id);
     }
+  }
+}
+
+// WHEP client. Reads the SDP-over-HTTP signaling protocol that go2rtc speaks
+// via /api/avio/:id/whep (which proxies to go2rtc /api/whep). Media itself
+// flows directly browser ↔ go2rtc over ICE — this is just the handshake.
+async function startAvioWhep(entry) {
+  entry.starting = true;
+  try {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      bundlePolicy: 'max-bundle',
+    });
+    // Receive-only — we never send media back to go2rtc.
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+    pc.ontrack = (ev) => {
+      // First track event populates the <video>'s MediaStream. Subsequent
+      // events (e.g. audio after video) just add to the same stream.
+      if (entry.video.srcObject !== ev.streams[0]) {
+        entry.video.srcObject = ev.streams[0];
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      console.debug('avio WHEP state:', pc.connectionState);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        // Auto-reconnect on failure — common after the sidecar kicks ffmpeg
+        // during a source switch.
+        setTimeout(() => {
+          if (entry.pc === pc) {
+            try { pc.close(); } catch {}
+            entry.pc = null;
+            entry.starting = false;
+            if (entry.video.isConnected) startAvioWhep(entry).catch(() => {});
+          }
+        }, 1500);
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    // Wait for ICE gathering to complete so the offer SDP carries all our
+    // candidates. go2rtc's WHEP doesn't support trickle ICE.
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === 'complete') return resolve();
+      const handler = () => {
+        if (pc.iceGatheringState === 'complete') {
+          pc.removeEventListener('icegatheringstatechange', handler);
+          resolve();
+        }
+      };
+      pc.addEventListener('icegatheringstatechange', handler);
+      // Hard timeout — if ICE never completes (firewall, etc.) we still send
+      // what we have. Browser handles trickle internally if go2rtc cooperates.
+      setTimeout(resolve, 1500);
+    });
+
+    const res = await fetch(entry.whepUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }),
+    });
+    if (!res.ok) throw new Error(`WHEP ${res.status}: ${await res.text()}`);
+    const answer = await res.json();
+    await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+    entry.pc = pc;
+  } finally {
+    entry.starting = false;
   }
 }
 

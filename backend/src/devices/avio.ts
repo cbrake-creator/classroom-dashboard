@@ -5,15 +5,21 @@
 //  Pearl 2's HDMI 1 program output. macOS TCC's camera-access
 //  attribution rules mean we can't have the launchd-managed
 //  backend spawn ffmpeg directly (silent denial), so the actual
-//  ffmpeg invocations happen inside the StudioDAWSidecar bundle
-//  via its loopback HTTP server. This file is just the backend's
-//  proxy + health probe.
+//  ffmpeg invocations happen inside the StudioDAWSidecar bundle.
+//  The bundle's ffmpeg pushes H.264 over RTSP to a local go2rtc
+//  instance; go2rtc translates the RTSP into WebRTC (via WHEP)
+//  for browser clients. Backend proxies snapshot + WHEP requests
+//  through to go2rtc; the sidecar's HTTP endpoint exists only
+//  for /healthz and /restart.
 // ──────────────────────────────────────────────────────────
 import axios from 'axios';
-import http from 'node:http';
 import { logger } from '../logger.js';
 
 const log = logger.child({ device: 'avio' });
+
+// go2rtc REST API base. Configurable via env so a future deployment can move
+// it; default matches what backend/go2rtc.yaml binds to.
+const GO2RTC_BASE = process.env.GO2RTC_BASE ?? 'http://127.0.0.1:1984';
 
 export interface AvioStatus {
   reachable: boolean;
@@ -21,22 +27,23 @@ export interface AvioStatus {
   lastFrameAt: number | null;
 }
 
-// Single-frame probe — also used by the dashboard's Snapshot button. Returns
-// the JPEG bytes on success, throws on any failure (timeout, ffmpeg error,
-// sidecar unreachable, no signal on HDMI 1).
-export async function snapshot(sidecarHost: string): Promise<Buffer> {
-  const res = await axios.get(`http://${sidecarHost}/avio/snapshot`, {
+// Single JPEG frame, fetched from go2rtc's built-in /api/frame.jpeg endpoint.
+// Used by the dashboard's Snapshot button. Returns the JPEG bytes on success,
+// throws on any failure (no producer, go2rtc unreachable, etc.).
+export async function snapshot(streamName: string = 'avio'): Promise<Buffer> {
+  const res = await axios.get(`${GO2RTC_BASE}/api/frame.jpeg`, {
+    params: { src: streamName },
     responseType: 'arraybuffer',
-    timeout: 10_000,
+    timeout: 5_000,
     validateStatus: () => true,
   });
   if (res.status !== 200) {
     const text = Buffer.from(res.data as ArrayBuffer).toString('utf-8').slice(0, 200);
-    throw new Error(`sidecar ${res.status}: ${text}`);
+    throw new Error(`go2rtc ${res.status}: ${text}`);
   }
   const buf = Buffer.from(res.data as ArrayBuffer);
   if (buf.length < 16 || buf[0] !== 0xff || buf[1] !== 0xd8) {
-    throw new Error('sidecar did not return JPEG bytes');
+    throw new Error('go2rtc did not return JPEG bytes (capture loop down?)');
   }
   return buf;
 }
@@ -77,46 +84,36 @@ export async function restartCapture(sidecarHost: string): Promise<boolean> {
   }
 }
 
-// Pipe the sidecar's mpjpeg stream straight to the dashboard client. Used by
-// the /api/avio/:id/mjpeg route. One upstream connection per browser viewer
-// (each spawns its own ffmpeg subprocess on the sidecar side). When the
-// browser disconnects, we destroy the upstream so the sidecar can kill ffmpeg
-// and release the AV.io device for the next viewer.
-export function pipeMjpeg(sidecarHost: string, res: import('express').Response, onClose?: () => void): void {
-  const [host, portStr] = sidecarHost.split(':');
-  const port = Number(portStr) || 80;
-  const upstream = http.request(
-    { host, port, path: '/avio/mjpeg', method: 'GET', timeout: 8000 },
-    (up) => {
-      const ct = String(up.headers['content-type'] ?? '');
-      if (up.statusCode !== 200 || !ct.startsWith('multipart/')) {
-        res.status(503).type('text/plain').end(
-          `sidecar mjpeg upstream ${up.statusCode} ${ct} — camera permission lost? ffmpeg missing?`
-        );
-        up.destroy();
-        return;
-      }
-      res.writeHead(200, {
-        'Content-Type': ct,
-        'Cache-Control': 'no-store',
-        'Connection': 'close',
-      });
-      up.pipe(res);
-    },
-  );
-  upstream.on('error', (err) => {
-    log.warn({ err: err.message }, 'avio mjpeg upstream error');
-    if (!res.headersSent) res.status(503).type('text/plain').end(`upstream error: ${err.message}`);
+// Forward a WebRTC SDP-offer/answer exchange to go2rtc. The browser POSTs
+// a JSON envelope { type: 'offer', sdp } to our /api/avio/:id/whep route;
+// we forward to go2rtc /api/webrtc?src=avio with the same JSON shape and
+// return go2rtc's { type: 'answer', sdp } unchanged. Media flows directly
+// between the browser and go2rtc's WebRTC ports (8555 UDP/TCP) over ICE —
+// this is only the signaling channel, body sizes are <10KB.
+//
+// (go2rtc 1.9.x doesn't expose a strict WHEP endpoint; this is the "legacy"
+// JSON-wrapped form. The route on our backend is still named /whep because
+// the externally-facing protocol is conceptually WHEP-shaped.)
+export interface WebRtcSignal {
+  type: 'offer' | 'answer';
+  sdp: string;
+}
+
+export async function whepProxy(
+  streamName: string,
+  signal: WebRtcSignal,
+): Promise<{ status: number; signal: WebRtcSignal | null; raw: string }> {
+  const res = await axios.post(`${GO2RTC_BASE}/api/webrtc`, signal, {
+    params: { src: streamName },
+    headers: { 'Content-Type': 'application/json' },
+    responseType: 'text',
+    timeout: 8_000,
+    validateStatus: () => true,
   });
-  upstream.on('timeout', () => {
-    upstream.destroy();
-    if (!res.headersSent) res.status(504).type('text/plain').end('upstream timeout');
-  });
-  // Browser navigated away or closed the tab — kill upstream so the sidecar
-  // can tear down ffmpeg and free the AV.io device.
-  res.on('close', () => {
-    upstream.destroy();
-    if (onClose) onClose();
-  });
-  upstream.end();
+  const raw = String(res.data);
+  if (res.status === 200) {
+    try { return { status: 200, signal: JSON.parse(raw) as WebRtcSignal, raw }; }
+    catch { /* fall through to raw */ }
+  }
+  return { status: res.status, signal: null, raw };
 }
