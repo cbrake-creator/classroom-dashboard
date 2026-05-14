@@ -62,6 +62,21 @@ export async function getStatus(sidecarHost: string): Promise<AvioStatus> {
   return { reachable, signalPresent: false, lastFrameAt: null };
 }
 
+// Tell the sidecar to kill its running ffmpeg subprocess. The capture loop's
+// outer while spins a fresh one up automatically. We call this after every
+// Pearl source-change because AV.io's HDMI link doesn't renegotiate cleanly
+// inside an existing avfoundation stream — without a fresh ffmpeg, the
+// dashboard keeps showing pre-switch buffered frames.
+export async function restartCapture(sidecarHost: string): Promise<boolean> {
+  try {
+    const res = await axios.post(`http://${sidecarHost}/avio/restart`, {}, { timeout: 3_000 });
+    return res.status === 200 && res.data?.ok === true;
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'avio restart failed');
+    return false;
+  }
+}
+
 // Pipe the sidecar's mpjpeg stream straight to the dashboard client. Used by
 // the /api/avio/:id/mjpeg route. One upstream connection per browser viewer
 // (each spawns its own ffmpeg subprocess on the sidecar side). When the

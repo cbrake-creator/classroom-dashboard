@@ -355,6 +355,13 @@ function makeFacultyPodcastStudio(): Room {
     signalPresent: false,
     lastFrameAt: null,
     sourceLabel: 'Pearl HDMI 1 (Program)',
+    // Pearl wiring confirmed live on 2026-05-14: D1 (HDMI 1) → AV.io;
+    // D2 (HDMI 2) → operator's secondary monitor.
+    pearlDeviceId: 'faculty-podcast--pearl-1',
+    pearlOutputId: 'D1',
+    currentSource: null,
+    currentSourceLabel: null,
+    multiviewLayoutJson: null,
   };
 
   return {

@@ -376,6 +376,14 @@
   /* AV.io capture preview spans every column — that's the "big preview
      screen" replacing the three Canon tiles on the Faculty Podcast room. */
   .device-card-wide { grid-column: 1 / -1; }
+  .avio-switcher {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .avio-switcher-label {
+    font-size: 11px; color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-right: 4px;
+  }
   .device-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -2530,17 +2538,45 @@ function renderDawBody(device) {
 // ── AV.io 4K capture card ──────────────────────────────────
 // Big live preview of the Pearl's HDMI 1 program output. The MJPEG stream is
 // served by the sidecar's loopback HTTP, proxied through /api/avio/:id/mjpeg.
-// Uses the same persistent-<img> dance as Canon previews so device:update
-// rerenders don't tear down the ffmpeg subprocess (would cost a 2s rebuffer).
+// Polls /snapshot at ~10 FPS instead of using multipart/x-mixed-replace MJPEG
+// in <img>. Reason: Chrome's MJPEG-in-img support has been progressively
+// restricted; tested empirically and even direct top-level navigation to the
+// MJPEG URL no longer renders subsequent frames. Polling cached snapshots is
+// browser-agnostic and the sidecar's continuous-capture loop keeps the
+// snapshot O(1) so we don't burn CPU on per-poll ffmpeg startups.
 function renderAvioBody(device) {
   const online = device.sidecarReachable;
   const snapshotUrl = `${BACKEND_URL}/api/avio/${device.id}/snapshot`;
-  const streamUrl   = `${BACKEND_URL}/api/avio/${device.id}/mjpeg`;
+  // Source switcher — current Pearl HDMI output mapping. The buttons drive
+  // POST /api/avio/:id/source, which writes Pearl's outputs/<port>/settings
+  // and kicks ffmpeg so AV.io renegotiates the HDMI link.
+  const currentSource = device.currentSource || null;
+  const sources = [
+    { id: 'multiview', label: 'Multi-view' },
+    { id: '1',         label: 'Center Camera' },
+    { id: '2',         label: 'Left Camera' },
+    { id: '3',         label: 'Right Camera' },
+  ];
+  const switcherHtml = `
+    <div class="avio-switcher">
+      <span class="avio-switcher-label">Pearl HDMI 1 source:</span>
+      ${sources.map((s) => `
+        <button class="ctrl-btn ${currentSource === s.id ? 'ctrl-btn-active' : 'ctrl-btn-neutral'}"
+                onclick="setAvioSource('${device.id}', '${s.id}')"
+                ${online ? '' : 'disabled'}
+                title="POST /api/avio/${device.id}/source { source: '${s.id}' }">
+          ${s.label}
+        </button>
+      `).join('')}
+    </div>
+  `;
+
   return `
+    ${switcherHtml}
     <div class="avio-preview" style="position:relative; width:100%; background:#000; aspect-ratio:16/9; border-radius:6px; overflow:hidden;">
       ${online ? `
-        <div class="cam-preview-slot" data-deviceid="${device.id}" data-stream-url="${streamUrl}" style="width:100%; height:100%;"></div>
-        <button class="cam-snapshot-btn" onclick="window.open('${snapshotUrl}', '_blank')" title="GET ${snapshotUrl}">&#128247; Snapshot</button>
+        <div class="avio-poll-slot" data-deviceid="${device.id}" data-snapshot-url="${snapshotUrl}" style="width:100%; height:100%;"></div>
+        <button class="cam-snapshot-btn" onclick="window.open('${snapshotUrl}?t=' + Date.now(), '_blank')" title="GET ${snapshotUrl}">&#128247; Snapshot</button>
       ` : `
         <div class="camera-feed-placeholder">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -2554,9 +2590,81 @@ function renderAvioBody(device) {
     <div class="rcp-conn-bar" style="margin-top:8px;">
       <div class="cam-session-dot" style="background: ${online ? 'var(--green)' : 'var(--red)'}"></div>
       <span>${online ? 'Capture online' : 'Sidecar offline'}</span>
-      <span style="color:var(--text-muted); margin-left:auto;">${device.sourceLabel || '—'} &middot; via ${device.sidecarHost}</span>
+      <span style="color:var(--text-muted); margin-left:auto;">${device.currentSourceLabel || device.sourceLabel || '—'} &middot; via ${device.sidecarHost}</span>
     </div>
   `;
+}
+
+// Click handler for the source-switcher buttons. Optimistically clears the
+// current frame (so the user sees the switch is in progress) — the polling
+// timer will pick up the new content within a couple seconds.
+async function setAvioSource(deviceId, sourceId) {
+  const slot = document.querySelector(`.avio-poll-slot[data-deviceid="${deviceId}"]`);
+  const img = slot?.querySelector('img');
+  if (img) img.style.opacity = '0.4';
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/avio/${deviceId}/source`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: sourceId }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.warn('avio source switch failed', err);
+    alert('Source switch failed: ' + (err.message || err));
+  } finally {
+    // Restore opacity after a short delay — the next poll will fetch fresh
+    // content. ffmpeg takes ~1-2s to re-establish the AV.io session.
+    setTimeout(() => { if (img) img.style.opacity = '1'; }, 1500);
+  }
+}
+
+// ── AV.io poll loop ────────────────────────────────────────
+// One persistent <img> per device, swapping src to /snapshot?t=<ms> every
+// AVIO_POLL_MS. Survives device:update rerenders the same way as the Canon
+// persistent-<img> cache — but each poll is a fresh HTTP request against
+// the cached frame endpoint, so the <img> can't get into a "first-frame-
+// stuck" state like multipart/x-mixed-replace does.
+const avioImgCache = new Map();  // deviceId -> { img, interval }
+const AVIO_POLL_MS = 100;        // 10 FPS — matches the Pearl's program output cadence in practice
+
+function attachPersistentAvioImgs() {
+  document.querySelectorAll('.avio-poll-slot').forEach((slot) => {
+    const id = slot.dataset.deviceid;
+    const url = slot.dataset.snapshotUrl;
+    if (!id || !url) return;
+    let entry = avioImgCache.get(id);
+    if (!entry) {
+      const img = document.createElement('img');
+      img.className = 'avio-preview-img';
+      img.alt = 'Live preview';
+      img.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#000;';
+      // Use a 2-buffer swap pattern: keep two <img>s and alternate src loads
+      // so we never see a blank frame between snapshots. The "back" buffer
+      // preloads while the "front" is visible. Simple version first: just
+      // swap src on a single img — modern browsers double-buffer internally.
+      const interval = setInterval(() => {
+        if (!img.isConnected) return;
+        img.src = `${url}?t=${Date.now()}`;
+      }, AVIO_POLL_MS);
+      img.src = `${url}?t=${Date.now()}`;
+      entry = { img, interval };
+      avioImgCache.set(id, entry);
+    }
+    if (entry.img.parentElement !== slot) slot.appendChild(entry.img);
+  });
+  // Clean up any cached entries whose slot is no longer in the DOM (room
+  // navigated away). Stops the polling timer so we don't keep hitting the
+  // backend after the user left the page.
+  const visible = new Set([...document.querySelectorAll('.avio-poll-slot')].map((s) => s.dataset.deviceid));
+  for (const [id, entry] of avioImgCache) {
+    if (!visible.has(id)) {
+      clearInterval(entry.interval);
+      entry.img.src = '';
+      entry.img.remove();
+      avioImgCache.delete(id);
+    }
+  }
 }
 
 function renderSimpleDeviceBody(device) {
@@ -2967,6 +3075,7 @@ function render() {
       renderDashboard();
     }
     attachPersistentCamImgs();
+    attachPersistentAvioImgs();
     // Populate Pearl recording lists for any Pearl cards on screen.
     document.querySelectorAll('[id^="pearl-recordings-"]').forEach((el) => {
       const id = el.id.replace('pearl-recordings-', '');

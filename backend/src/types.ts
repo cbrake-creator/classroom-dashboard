@@ -265,6 +265,19 @@ export interface CaptureCardDevice extends BaseDevice {
   lastFrameAt: number | null; // epoch ms of last successful snapshot probe
   // Cosmetic: how the source is labelled to the user.
   sourceLabel: string;       // e.g. 'Pearl HDMI 1 (Program)'
+  // Pearl wiring: which Pearl + HDMI output port is feeding this AV.io. Used
+  // to drive the dashboard's source switcher — POST /api/avio/:id/source
+  // routes through to Pearl's outputs/<port>/settings.
+  pearlDeviceId: string;     // e.g. 'faculty-podcast--pearl-1'
+  pearlOutputId: string;     // e.g. 'D1' for HDMI 1
+  // Live mirror of Pearl's outputs/<port>/settings — populated each poll.
+  currentSource: string | null;        // 'multiview' | channel id ('1','2','3') | null when unknown
+  currentSourceLabel: string | null;   // human label e.g. 'Center Camera' or 'Multi-view'
+  // The original multiview layout JSON to restore when switching back to
+  // 'multiview' from a single-channel view. Captured from Pearl on first
+  // refresh — Pearl's settings response only includes `layout` when source
+  // is multiview, so we have to remember it.
+  multiviewLayoutJson: string | null;
 }
 
 // ─── Union ─────────────────────────────────────────────────

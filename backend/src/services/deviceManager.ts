@@ -151,17 +151,47 @@ async function refreshDevice(device: Device): Promise<Partial<Device> | null> {
   }
 }
 
-// Capture-card refresh: just probe the sidecar's /healthz. Doing a real
-// snapshot here would burn ~2s per poll cycle and pin the AV.io device,
-// blocking the dashboard's live MJPEG viewers. Signal-present detection
-// happens lazily when someone actually requests a snapshot.
+// Capture-card refresh: probe the sidecar's /healthz (cheap), and read
+// Pearl's HDMI output settings so the dashboard knows which source the AV.io
+// is currently capturing. Skip the snapshot path here — it'd burn ~2s per
+// poll and pin the AV.io device, blocking the live preview viewers.
 async function refreshAvio(device: CaptureCardDevice): Promise<Partial<Device>> {
   const reachable = await avio.probeReachable(device.sidecarHost);
-  return {
+  const patch: Partial<CaptureCardDevice> = {
     status: reachable ? 'online' : 'offline',
     sidecarReachable: reachable,
     lastError: reachable ? null : 'sidecar HTTP server not reachable',
-  } as Partial<Device>;
+  };
+  // Resolve the Pearl device by id (configured in the fixture) so we can read
+  // its current HDMI output mapping. Tolerate missing/offline Pearl — capture
+  // still works; we just can't display which source is active.
+  const pearlEntry = getDevice(device.pearlDeviceId);
+  if (pearlEntry && pearlEntry.device.type === 'pearl') {
+    try {
+      const settings = await pearl.getOutputSettings(pearlEntry.device.ip, device.pearlOutputId);
+      patch.currentSource = settings.source ?? null;
+      patch.currentSourceLabel = labelForSource(settings.source, pearlEntry.device);
+      // Remember the multiview layout the first time we see it so the
+      // source-switcher can restore it when flipping back from a single
+      // channel. Pearl's response only includes `layout` when source is
+      // currently multiview, so we cache it.
+      if (settings.source === 'multiview' && settings.layout) {
+        patch.multiviewLayoutJson = settings.layout;
+      }
+    } catch {
+      // Pearl unreachable or no permission. Leave currentSource as-is.
+    }
+  }
+  return patch as Partial<Device>;
+}
+
+// Human label for a Pearl HDMI source value. 'multiview' is itself; a numeric
+// channel id maps to that channel's `name` field on the Pearl device.
+function labelForSource(source: string | undefined | null, pearlDev: PearlDevice): string | null {
+  if (!source) return null;
+  if (source === 'multiview') return 'Multi-view';
+  const ch = pearlDev.channels.find((c) => String(c.id) === source);
+  return ch?.name ?? `Channel ${source}`;
 }
 
 // DAW status is push, not polled — the sidecar opens a Socket.IO connection
