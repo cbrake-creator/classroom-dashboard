@@ -288,6 +288,21 @@ final class H264Encoder {
         // Keyframe interval (in frames AND seconds — we set both).
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
                              value: NSNumber(value: keyframeIntervalFrames))
+        // Color-matrix metadata, mirroring exactly what AVCaptureSession
+        // reports for AV.io's CMSampleBuffer attachments (verified at runtime
+        // by FrameProcessor's first-frame log):
+        //   YCbCrMatrix       : ITU_R_709_2
+        //   ColorPrimaries    : ITU_R_709_2
+        //   TransferFunction  : SMPTE_240M_1995  (older HDTV transfer)
+        // Tagging the H.264 SPS to match avoids decoder colorspace fallback
+        // (which causes green/cyan casts on flat-color content like Pearl's
+        // NO SIGNAL graphic).
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
+                             value: kCMFormatDescriptionColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction,
+                             value: kCMFormatDescriptionTransferFunction_SMPTE_240M_1995)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
+                             value: kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2)
         // Tell encoder to prepare for streaming output (allocates internal state).
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
@@ -436,6 +451,21 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
                 let firstFrameLatency = Date().timeIntervalSince(startWall) * 1000.0
                 logErr(String(format: "first frame: %dx%d  %@  (open→first-frame latency: %.0fms)",
                               Int(dim.width), Int(dim.height), fourCC(subtype), firstFrameLatency))
+            }
+            // Log the source CVImageBuffer's color attachments so we can
+            // verify what AV.io is actually delivering vs what we're tagging
+            // on the encoder output. Mismatches between these cause color casts.
+            if let pb = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                func attach(_ key: CFString) -> String {
+                    if let v = CVBufferCopyAttachment(pb, key, nil) {
+                        return "\(v)"
+                    }
+                    return "<unset>"
+                }
+                logErr("source color attachments:")
+                logErr("  YCbCrMatrix:      \(attach(kCVImageBufferYCbCrMatrixKey))")
+                logErr("  ColorPrimaries:   \(attach(kCVImageBufferColorPrimariesKey))")
+                logErr("  TransferFunction: \(attach(kCVImageBufferTransferFunctionKey))")
             }
         }
 
