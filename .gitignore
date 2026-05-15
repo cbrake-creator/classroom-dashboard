@@ -3,3 +3,8 @@ claude-memory/
 .claude-start.sh
 .DS_Store
 ._*
+
+# Vendored binaries — large static builds (evermeet ffmpeg, go2rtc).
+# Install fresh on a new machine via sidecar/macos/build_bundle.sh and
+# the README, not via git.
+bin/

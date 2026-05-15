@@ -201,6 +201,31 @@ export async function setChannelLayout(host: string, channelId: number, layoutId
   log.info({ host, channelId, layoutId }, 'pearl layout switch');
 }
 
+// ─── HDMI output source mapping ────────────────────────────
+// Pearl's HDMI output ports ("D1", "D2") can mirror a single encoder channel
+// OR a multiview composition. We use this to drive the AV.io capture card —
+// the studio Mac's USB capture card receives whatever Pearl's HDMI 1 emits.
+// PUT shape verified live against Pearl 2 firmware 4.24.3 on 10.56.1.236.
+export interface PearlOutputSettings {
+  source: string;         // either a channel id (e.g. "1") or "multiview"
+  layout?: string;        // JSON-stringified layout (only when source=multiview)
+  audio?: boolean;
+  audio_volume?: number;
+  mirrored?: boolean;
+}
+
+export async function getOutputSettings(host: string, outputId: string): Promise<PearlOutputSettings> {
+  const res = await client(host).get(`/outputs/${outputId}/settings`);
+  return (res.data?.result ?? {}) as PearlOutputSettings;
+}
+
+export async function setOutputSettings(host: string, outputId: string, settings: PearlOutputSettings): Promise<void> {
+  await client(host).put(`/outputs/${outputId}/settings`, settings, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  log.info({ host, outputId, source: settings.source }, 'pearl output settings');
+}
+
 // Soft reboot via Pearl's REST API. Endpoint name varies by firmware —
 // try the documented /system/reboot first, fall back to /system/restart.
 export async function softReboot(host: string): Promise<void> {

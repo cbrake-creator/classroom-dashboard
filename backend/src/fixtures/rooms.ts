@@ -7,6 +7,7 @@
 import type {
   CameraDevice,
   Campus,
+  CaptureCardDevice,
   DashboardState,
   DawDevice,
   DawStrip,
@@ -338,11 +339,36 @@ function makeFacultyPodcastStudio(): Room {
     outputDir: null,
   };
 
+  // AV.io 4K capture card — plugged into the studio Mac via USB, captures
+  // the Pearl's HDMI 1 program output. The sidecar serves snapshots + MJPEG
+  // over loopback HTTP because TCC camera permission only resolves correctly
+  // when the capture process is a descendant of the sidecar bundle.
+  const avio: CaptureCardDevice = {
+    id: 'avio-1',
+    type: 'avio',
+    brand: 'Epiphan',
+    model: 'AV.io 4K',
+    ip: `via ${config.mac.host} (USB)`,
+    status: 'offline',
+    sidecarHost: '127.0.0.1:3301',
+    sidecarReachable: false,
+    signalPresent: false,
+    lastFrameAt: null,
+    sourceLabel: 'Pearl HDMI 1 (Program)',
+    // Pearl wiring confirmed live on 2026-05-14: D1 (HDMI 1) → AV.io;
+    // D2 (HDMI 2) → operator's secondary monitor.
+    pearlDeviceId: 'faculty-podcast--pearl-1',
+    pearlOutputId: 'D1',
+    currentSource: null,
+    currentSourceLabel: null,
+    multiviewLayoutJson: null,
+  };
+
   return {
     id: 'faculty-podcast',
     name: 'Faculty Podcast Studio',
     type: 'studio',
-    devices: [pearl, cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, daw],
+    devices: [pearl, cam(1, 244, 'Left'), cam(2, 242, 'Center'), cam(3, 243, 'Right'), mac, daw, avio],
   };
 }
 

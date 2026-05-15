@@ -238,6 +238,46 @@ export interface DawDevice extends BaseDevice {
   recording: DawRecordingState;
   monitoring: boolean;
   outputDir: string | null;        // folder where the sidecar writes per-channel WAVs
+  // Sidecar self-reported health, pushed every 2s. Lets the dashboard
+  // distinguish "sidecar online but mic blocked" from "sidecar offline" etc.
+  micState?: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown' | 'n/a';
+  deviceState?: 'present' | 'missing' | 'unknown';
+  lastPeakAgeMs?: number | null;   // ms since the last non-zero audio sample; null = never
+  recordingActive?: boolean;
+}
+
+// ─── AV.io 4K capture card (Epiphan HDMI→USB) ─────────────
+// Plugged into the studio Mac via USB. Captures the Pearl 2's HDMI 1 program
+// output. The sidecar (running in a TCC-blessed bundle) serves an MJPEG
+// stream + snapshots over loopback HTTP; the backend proxies to it. Lives
+// alongside the DAW because both share the same bundle's camera+mic TCC.
+export interface CaptureCardDevice extends BaseDevice {
+  type: 'avio';
+  // Where the sidecar's HTTP server listens. Backend proxies /api/avio/:id/*
+  // to here; the dashboard never talks to this address directly.
+  sidecarHost: string;       // e.g. '127.0.0.1:3301'
+  // Whether the sidecar is reachable AND ffmpeg is present. Doesn't tell us
+  // whether HDMI 1 is actually emitting signal — that requires either a
+  // separate Pearl encoder-state check or a snapshot probe.
+  sidecarReachable: boolean;
+  // Last snapshot probe result. Set by deviceManager when refreshDevice runs.
+  signalPresent: boolean;
+  lastFrameAt: number | null; // epoch ms of last successful snapshot probe
+  // Cosmetic: how the source is labelled to the user.
+  sourceLabel: string;       // e.g. 'Pearl HDMI 1 (Program)'
+  // Pearl wiring: which Pearl + HDMI output port is feeding this AV.io. Used
+  // to drive the dashboard's source switcher — POST /api/avio/:id/source
+  // routes through to Pearl's outputs/<port>/settings.
+  pearlDeviceId: string;     // e.g. 'faculty-podcast--pearl-1'
+  pearlOutputId: string;     // e.g. 'D1' for HDMI 1
+  // Live mirror of Pearl's outputs/<port>/settings — populated each poll.
+  currentSource: string | null;        // 'multiview' | channel id ('1','2','3') | null when unknown
+  currentSourceLabel: string | null;   // human label e.g. 'Center Camera' or 'Multi-view'
+  // The original multiview layout JSON to restore when switching back to
+  // 'multiview' from a single-channel view. Captured from Pearl on first
+  // refresh — Pearl's settings response only includes `layout` when source
+  // is multiview, so we have to remember it.
+  multiviewLayoutJson: string | null;
 }
 
 // ─── Union ─────────────────────────────────────────────────
@@ -253,7 +293,8 @@ export type Device =
   | PearlDevice
   | MacDevice
   | RodecasterDevice
-  | DawDevice;
+  | DawDevice
+  | CaptureCardDevice;
 
 // ─── Rooms / campuses ──────────────────────────────────────
 export type RoomType = 'classroom' | 'conference' | 'studio';

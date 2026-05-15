@@ -17,6 +17,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import { pinoHttp } from 'pino-http';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import avioRouter from './routes/avio.js';
 import canonRouter from './routes/canon.js';
 import dawRouter from './routes/daw.js';
 import fsRouter from './routes/fs.js';
@@ -30,6 +31,7 @@ import studioRouter from './routes/studio.js';
 import { startPolling, stopPolling } from './services/deviceManager.js';
 import * as logitechSync from './devices/logitechSync.js';
 import * as autoRecovery from './services/autoRecovery.js';
+import * as go2rtcSupervisor from './services/go2rtcSupervisor.js';
 import * as macClient from './devices/mac.js';
 import { initSocketServer } from './ws/socketServer.js';
 import { initSidecarNamespace } from './ws/sidecarServer.js';
@@ -61,6 +63,7 @@ app.use('/api/canon', canonRouter);
 app.use('/api/mac', macRouter);
 app.use('/api/studio', studioRouter);
 app.use('/api/daw', dawRouter);
+app.use('/api/avio', avioRouter);
 app.use('/api/fs', fsRouter);
 app.use('/api/presets', presetsRouter);
 app.use('/api/uptime', uptimeRouter);
@@ -71,8 +74,12 @@ app.get('/healthz', (_req, res) => {
   res.json({ ok: true, mode: config.deviceMode });
 });
 
-// Static dashboard. Mount AFTER /api so the catch-all index doesn't shadow API routes.
+// Static dashboard. Mount AFTER /api so the catch-all index doesn't shadow
+// API routes. no-store because we deploy dashboard.html frequently and don't
+// want browsers serving stale UI after a backend bounce — the file is small
+// (~150 KB) so per-load fetch cost is trivial.
 app.get('/', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   res.sendFile(resolve(repoRoot, 'dashboard.html'));
 });
 // Standalone mixer app (ported from local-daw) — click-through from the DAW card.
@@ -107,6 +114,10 @@ httpServer.listen(config.port, () => {
   // Auto-recovery scheduler: starts unconditionally, but no-ops every
   // fire if the persisted toggle (data/auto-recovery.json) says disabled.
   autoRecovery.start();
+  // go2rtc: child process that bridges the sidecar's RTSP push → WebRTC
+  // for the dashboard's AV.io live preview. Started here so its lifecycle
+  // follows the backend's launchd plist (no separate plist needed).
+  go2rtcSupervisor.start();
 });
 
 // Graceful shutdown
@@ -115,6 +126,7 @@ function shutdown(signal: string): void {
   stopPolling();
   logitechSync.stopPolling();
   autoRecovery.stop();
+  go2rtcSupervisor.stop();
   macClient.disconnect();
   httpServer.close(() => process.exit(0));
   // Hard-exit if close hangs

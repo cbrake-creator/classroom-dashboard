@@ -373,6 +373,17 @@
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
     gap: 16px;
   }
+  /* AV.io capture preview spans every column — that's the "big preview
+     screen" replacing the three Canon tiles on the Faculty Podcast room. */
+  .device-card-wide { grid-column: 1 / -1; }
+  .avio-switcher {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .avio-switcher-label {
+    font-size: 11px; color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-right: 4px;
+  }
   .device-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -1052,6 +1063,14 @@
     border: 1px solid var(--border); border-radius: var(--radius-sm);
     font-size: 12px; margin-bottom: 12px;
   }
+  .daw-pill-row { display: inline-flex; gap: 6px; }
+  .daw-pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+    line-height: 1.4;
+  }
+  .daw-pill-error { background: var(--red); color: #fff; }
+  .daw-pill-warn  { background: #d97706; color: #fff; }
   .rcp-strip-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
   .rcp-strip {
     display: grid;
@@ -1249,12 +1268,30 @@ function findDeviceInConfig(campusId, roomId, deviceId) {
 }
 
 // True when the only change between `prev` and `next` is strips[].peakDb —
-// i.e. a live-meter tick that we can paint without a full re-render.
+// i.e. a live-meter tick that we can paint without a full re-render. Any
+// field that the DAW card visually displays must be in `scalars` so a
+// genuine change forces a full render and the UI doesn't lag behind state.
 function isDawLevelsOnlyPatch(prev, next) {
   if (!prev || !next || prev.type !== 'daw' || next.type !== 'daw') return false;
-  const scalars = ['status','sidecarConnected','sidecarVersion','captureDevice','sampleRate','monitoring','outputDir'];
+  const scalars = [
+    'status','sidecarConnected','sidecarVersion','captureDevice','sampleRate',
+    'monitoring','outputDir',
+    // Health fields rendered as red/orange pills in the connection bar.
+    // Without these, deviceState 'missing'→'present' (and the reverse) gets
+    // misclassified as a levels-only tick and the pill never clears — user
+    // sees "Capture device missing" until they manually refresh.
+    'micState','deviceState',
+  ];
   for (const k of scalars) if (prev[k] !== next[k]) return false;
   if (JSON.stringify(prev.recording||null) !== JSON.stringify(next.recording||null)) return false;
+  // Audio-stale pill: shown when lastPeakAgeMs > 5000 AND deviceState='present'.
+  // Treat it as "changed" only when the value crosses that threshold — otherwise
+  // every 2s health tick would force a full render (lastPeakAgeMs ticks up
+  // continuously).
+  const STALE_MS = 5000;
+  const prevStale = (prev.lastPeakAgeMs ?? 0) > STALE_MS;
+  const nextStale = (next.lastPeakAgeMs ?? 0) > STALE_MS;
+  if (prevStale !== nextStale) return false;
   const a = prev.strips || [], b = next.strips || [];
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -1411,7 +1448,8 @@ function deviceIcon(type) {
     pearl: '&#9210;',           // encoder/recorder
     mac: '&#63743;',            // mac (Apple logo PUA — falls back gracefully)
     rodecaster: '&#9836;',      // mixer
-    daw: '&#9835;'              // DAW / console
+    daw: '&#9835;',             // DAW / console
+    avio: '&#128249;'           // film camera — capture card / live preview
   };
   return icons[type] || '&#9679;';
 }
@@ -1420,7 +1458,8 @@ function deviceTypeName(type) {
   const names = {
     camera: 'Camera', nuc: 'Computer', 'network-switch': 'Switch', display: 'Display',
     'rally-bar': 'Rally Bar', tap: 'Tap Controller', sight: 'Sight Camera', audio: 'Audio',
-    pearl: 'Encoder', mac: 'Mac Studio', rodecaster: 'Mixer', daw: 'Studio DAW'
+    pearl: 'Encoder', mac: 'Mac Studio', rodecaster: 'Mixer', daw: 'Studio DAW',
+    avio: 'Capture'
   };
   return names[type] || type;
 }
@@ -1587,6 +1626,22 @@ setInterval(refreshUptime, 60000);
 //  RENDER: ROOM DETAIL (Level 2)
 // ══════════════════════════════════════════════
 
+// Per-room device ordering + filtering. The Faculty Podcast room replaces its
+// three Canon camera tiles with a single big AV.io capture-card preview
+// showing the Pearl's HDMI 1 program output — the cameras are still in the
+// fixture state (room-level multi-cam presets need them, and the Pearl HDMI
+// feed is composed from their inputs) but they're not rendered as cards.
+// Other rooms render every device.
+function orderedRoomDevices(room) {
+  let devs = room.devices;
+  if (room.id === 'faculty-podcast') {
+    devs = devs.filter(d => d.type !== 'camera');
+    // Float the AV.io tile to the top so it lands above Pearl / DAW / Mac.
+    devs.sort((a, b) => (a.type === 'avio' ? -1 : 0) - (b.type === 'avio' ? -1 : 0));
+  }
+  return devs;
+}
+
 function renderRoomDetail(roomId, viewChanged) {
   const campus = CONFIG.campuses.find(c => c.id === state.activeCampusId);
   const room = campus.rooms.find(r => r.id === roomId);
@@ -1605,7 +1660,7 @@ function renderRoomDetail(roomId, viewChanged) {
     ${room.type === 'studio' ? renderStudioSessionBar(room) : ''}
     ${room.type === 'studio' && room.devices.some(d => d.type === 'camera') ? `<div id="preset-panel-${room.id}"></div>` : ''}
     <div class="device-grid">
-      ${room.devices.map(d => renderDeviceCard(d)).join('')}
+      ${orderedRoomDevices(room).map(d => renderDeviceCard(d)).join('')}
     </div>
   `;
   // Room-level multi-cam preset panel: studios only (Faculty Podcast / Tech Talks).
@@ -1891,10 +1946,16 @@ function renderDeviceCard(device) {
     body = renderRodecasterBody(device);
   } else if (device.type === 'daw') {
     body = renderDawBody(device);
+  } else if (device.type === 'avio') {
+    body = renderAvioBody(device);
   }
 
+  // The AV.io capture-card preview should span the full row in the studio
+  // grid — it's the "big preview screen" replacing the three camera tiles.
+  const cardClass = device.type === 'avio' ? 'device-card device-card-wide' : 'device-card';
+
   return `
-    <div class="device-card" data-device-id="${device.id}">
+    <div class="${cardClass}" data-device-id="${device.id}">
       <div class="device-card-header">
         <div class="device-card-header-left">
           <div class="device-icon">${deviceIcon(device.type)}</div>
@@ -2380,11 +2441,41 @@ function renderDawBody(device) {
   // Map -60 dB → 0%, 0 dB → 100%. Values below -60 clamp to 0.
   const meterPct = p => (p == null) ? 0 : Math.max(0, Math.min(100, ((p + 60) / 60) * 100));
 
+  // Sidecar self-reported health. Empty string when healthy so the bar stays
+  // clean — only render badges when something needs attention.
+  const healthBadges = [];
+  if (sidecar) {
+    if (device.micState && device.micState !== 'granted' && device.micState !== 'n/a') {
+      healthBadges.push(`<span class="daw-pill daw-pill-error" title="Sidecar TCC microphone permission state">Mic ${device.micState}</span>`);
+    }
+    if (device.deviceState === 'missing') {
+      healthBadges.push(`<span class="daw-pill daw-pill-error" title="RØDECaster Pro II not enumerable from sounddevice — check USB">Capture device missing</span>`);
+    }
+    // Stale audio: sidecar is connected and device claims present, but no
+    // non-zero sample for >5s. Most likely a USB hiccup that hasn't tripped
+    // the supervisor's tear-down yet.
+    if (device.deviceState === 'present' && device.lastPeakAgeMs != null && device.lastPeakAgeMs > 5000) {
+      const sec = Math.round(device.lastPeakAgeMs / 1000);
+      healthBadges.push(`<span class="daw-pill daw-pill-warn" title="No audio samples for ${sec}s — capture stream may have stalled">Audio stale ${sec}s</span>`);
+    }
+  }
+  const badgesHtml = healthBadges.length ? `<span class="daw-pill-row">${healthBadges.join('')}</span>` : '';
+
+  // Recording error: pre-flight refusal (disk full, output dir not writable,
+  // can't open WAV writers, etc.) is sticky on `recording.error` until the
+  // next record-start attempt. Surface it in the Recording cell.
+  const recError = rec.error || null;
+  const recValue = recError
+    ? `<span title="${escapeAttr(recError)}">Error</span>`
+    : (rec.active ? '&#11044; REC ' + durStr : 'Idle');
+  const recCls = recError ? 'error' : (rec.active ? 'error' : '');
+
   return `
     <!-- Sidecar connection bar -->
     <div class="rcp-conn-bar">
       <div class="cam-session-dot" style="background: ${sidecar ? 'var(--green)' : 'var(--red)'}"></div>
       <span>${sidecar ? `Sidecar connected${device.sidecarVersion ? ' · v' + device.sidecarVersion : ''}` : 'Sidecar not connected — start studio-daw on the Mac'}</span>
+      ${badgesHtml}
       <span style="color:var(--text-muted); margin-left:auto;">${device.captureDevice || '—'} &middot; ${(device.sampleRate||0)/1000}kHz</span>
     </div>
 
@@ -2396,13 +2487,14 @@ function renderDawBody(device) {
       </div>
       <div class="metric-item">
         <div class="metric-label">Recording</div>
-        <div class="metric-value ${rec.active ? 'error' : ''}">${rec.active ? '&#11044; REC ' + durStr : 'Idle'}</div>
+        <div class="metric-value ${recCls}">${recValue}</div>
       </div>
       <div class="metric-item">
         <div class="metric-label">Monitor</div>
         <div class="metric-value ${device.monitoring ? 'ok' : ''}">${device.monitoring ? 'On' : 'Off'}</div>
       </div>
     </div>
+    ${recError ? `<div class="device-note" style="color:var(--red); font-size:11px;">Last record-start refused: ${escapeAttr(recError)}</div>` : ''}
 
     <!-- Output folder — where the sidecar writes one WAV per channel. -->
     <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:12px 0 6px;">Output Folder</div>
@@ -2417,6 +2509,11 @@ function renderDawBody(device) {
     <div class="device-note" style="font-size:10px;">
       Each channel is written to its own mono 24-bit WAV under a timestamped subfolder, so DAWs that don't import multichannel (GarageBand) can still pull each mic into a track.
     </div>
+
+    <!-- Recent Recordings: lists studio_<ts>/ session subdirs under outputDir.
+         Populated lazily on render via loadDawRecordings(). Refreshes when a
+         record-stop event lands (handler at the bottom of this file). -->
+    <div id="daw-recordings-${device.id}" class="pearl-recordings"></div>
 
     <!-- Live per-channel input levels (driven by sidecar 'levels' events) -->
     <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:12px 0 6px;">Input Levels</div>
@@ -2436,6 +2533,239 @@ function renderDawBody(device) {
       }).join('')}
     </div>
   `;
+}
+
+// ── AV.io 4K capture card ──────────────────────────────────
+// Big live preview of the Pearl's HDMI 1 program output. The MJPEG stream is
+// served by the sidecar's loopback HTTP, proxied through /api/avio/:id/mjpeg.
+// Polls /snapshot at ~10 FPS instead of using multipart/x-mixed-replace MJPEG
+// in <img>. Reason: Chrome's MJPEG-in-img support has been progressively
+// restricted; tested empirically and even direct top-level navigation to the
+// MJPEG URL no longer renders subsequent frames. Polling cached snapshots is
+// browser-agnostic and the sidecar's continuous-capture loop keeps the
+// snapshot O(1) so we don't burn CPU on per-poll ffmpeg startups.
+function renderAvioBody(device) {
+  const online = device.sidecarReachable;
+  const snapshotUrl = `${BACKEND_URL}/api/avio/${device.id}/snapshot`;
+  const whepUrl     = `${BACKEND_URL}/api/avio/${device.id}/whep`;
+  // Source switcher — current Pearl HDMI output mapping. The buttons drive
+  // POST /api/avio/:id/source, which writes Pearl's outputs/<port>/settings
+  // and kicks ffmpeg so AV.io renegotiates the HDMI link.
+  const currentSource = device.currentSource || null;
+  const sources = [
+    { id: 'multiview', label: 'Multi-view' },
+    { id: '1',         label: 'Center Camera' },
+    { id: '2',         label: 'Left Camera' },
+    { id: '3',         label: 'Right Camera' },
+  ];
+  const switcherHtml = `
+    <div class="avio-switcher">
+      <span class="avio-switcher-label">Pearl HDMI 1 source:</span>
+      ${sources.map((s) => `
+        <button class="ctrl-btn ${currentSource === s.id ? 'ctrl-btn-active' : 'ctrl-btn-neutral'}"
+                onclick="setAvioSource('${device.id}', '${s.id}')"
+                ${online ? '' : 'disabled'}
+                title="POST /api/avio/${device.id}/source { source: '${s.id}' }">
+          ${s.label}
+        </button>
+      `).join('')}
+    </div>
+  `;
+
+  return `
+    ${switcherHtml}
+    <div class="avio-preview" style="position:relative; width:100%; background:#000; aspect-ratio:16/9; border-radius:6px; overflow:hidden;">
+      ${online ? `
+        <div class="avio-whep-slot" data-deviceid="${device.id}" data-whep-url="${whepUrl}" style="width:100%; height:100%; position:relative;"></div>
+        <button class="cam-snapshot-btn" onclick="window.open('${snapshotUrl}?t=' + Date.now(), '_blank')" title="GET ${snapshotUrl}">&#128247; Snapshot</button>
+      ` : `
+        <div class="camera-feed-placeholder">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="5" width="15" height="14" rx="2"/>
+            <polygon points="22,7 17,12 22,17"/>
+          </svg>
+          <span>Sidecar unreachable — capture daemon not running</span>
+        </div>
+      `}
+    </div>
+    <div class="rcp-conn-bar" style="margin-top:8px;">
+      <div class="cam-session-dot" style="background: ${online ? 'var(--green)' : 'var(--red)'}"></div>
+      <span>${online ? 'Capture online' : 'Sidecar offline'}</span>
+      <span style="color:var(--text-muted); margin-left:auto;">${device.currentSourceLabel || device.sourceLabel || '—'} &middot; via ${device.sidecarHost}</span>
+    </div>
+  `;
+}
+
+// Click handler for the source-switcher buttons. POSTs to /source, which
+// changes Pearl's output AND kicks the sidecar's ffmpeg. The kick tears
+// down the RTSP push to go2rtc, which causes our WebRTC connection to
+// disconnect — the auto-reconnect in startAvioWhep handles re-establishing
+// the stream once the new ffmpeg + RTSP session comes back (~1-2s).
+async function setAvioSource(deviceId, sourceId) {
+  const slot = document.querySelector(`.avio-whep-slot[data-deviceid="${deviceId}"]`);
+  const video = slot?.querySelector('video');
+  if (video) video.style.opacity = '0.4';
+  // Proactively close the current WebRTC connection so we don't sit on a
+  // dead one while waiting for the reconnect timer.
+  const entry = avioWhepCache.get(deviceId);
+  if (entry?.pc) {
+    try { entry.pc.close(); } catch {}
+    entry.pc = null;
+  }
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/avio/${deviceId}/source`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: sourceId }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.warn('avio source switch failed', err);
+    alert('Source switch failed: ' + (err.message || err));
+  } finally {
+    // attachPersistentAvioImgs re-checks for connections each render — and
+    // since we cleared entry.pc above, it'll spin up a fresh WHEP session
+    // automatically. Bring the opacity back after the typical reconnect time.
+    setTimeout(() => {
+      if (video) video.style.opacity = '1';
+      if (entry && !entry.pc && !entry.starting && entry.video.isConnected) {
+        startAvioWhep(entry).catch(() => {});
+      }
+    }, 1800);
+  }
+}
+
+// ── AV.io poll loop ────────────────────────────────────────
+// One persistent <img> per device, swapping src to /snapshot?t=<ms> every
+// AVIO_POLL_MS. Survives device:update rerenders the same way as the Canon
+// persistent-<img> cache — but each poll is a fresh HTTP request against
+// the cached frame endpoint, so the <img> can't get into a "first-frame-
+// stuck" state like multipart/x-mixed-replace does.
+// One active RTCPeerConnection per AV.io device. Survives device:update
+// rerenders the same way camImgCache does for Canon previews — the <video>
+// node gets reparented into the new slot without tearing down the WebRTC
+// session, so the dashboard's frequent full renders don't cause a fresh
+// SDP handshake + AV.io→ffmpeg→go2rtc startup every time.
+const avioWhepCache = new Map();   // deviceId -> { video, pc, whepUrl }
+
+function attachPersistentAvioImgs() {
+  document.querySelectorAll('.avio-whep-slot').forEach((slot) => {
+    const id = slot.dataset.deviceid;
+    const whepUrl = slot.dataset.whepUrl;
+    if (!id || !whepUrl) return;
+    let entry = avioWhepCache.get(id);
+    if (!entry) {
+      const video = document.createElement('video');
+      video.className = 'avio-preview-video';
+      video.autoplay = true;
+      video.muted = true;        // required for autoplay without user gesture
+      video.playsInline = true;
+      video.controls = false;
+      video.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#000;';
+      // The actual SDP handshake happens lazily once the <video> is attached.
+      entry = { video, pc: null, whepUrl, starting: false };
+      avioWhepCache.set(id, entry);
+    }
+    if (entry.video.parentElement !== slot) slot.appendChild(entry.video);
+    // (Re)connect WebRTC if not already connected. The connection survives
+    // dashboard rerenders — the <video> just gets moved between slots.
+    if (!entry.pc && !entry.starting) {
+      startAvioWhep(entry).catch((err) => {
+        console.warn('avio WHEP connect failed', err);
+      });
+    }
+  });
+  // Clean up: device no longer rendered → tear down the peer connection so
+  // go2rtc can release its consumer slot.
+  const visible = new Set([...document.querySelectorAll('.avio-whep-slot')].map((s) => s.dataset.deviceid));
+  for (const [id, entry] of avioWhepCache) {
+    if (!visible.has(id)) {
+      try { entry.pc?.close(); } catch {}
+      entry.video.srcObject = null;
+      entry.video.remove();
+      avioWhepCache.delete(id);
+    }
+  }
+}
+
+// WHEP client. Reads the SDP-over-HTTP signaling protocol that go2rtc speaks
+// via /api/avio/:id/whep (which proxies to go2rtc /api/whep). Media itself
+// flows directly browser ↔ go2rtc over ICE — this is just the handshake.
+async function startAvioWhep(entry) {
+  entry.starting = true;
+  try {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      bundlePolicy: 'max-bundle',
+    });
+    // Receive-only — we never send media back to go2rtc.
+    const vTrx = pc.addTransceiver('video', { direction: 'recvonly' });
+    const aTrx = pc.addTransceiver('audio', { direction: 'recvonly' });
+    // Pin the browser's WebRTC jitter buffer to its minimum. Chrome's default
+    // is adaptive (grows up to ~500-1000ms under packet jitter) which is
+    // right for conferencing but a major contributor to lag for a local
+    // monitoring feed where the source is on the same LAN with no real packet
+    // loss. We set BOTH the older playoutDelayHint (hint, Chrome ≥90) and
+    // the newer jitterBufferTarget (stricter, Chrome ≥110). The newer API
+    // actually enforces a target buffer depth in ms; 0 = flush as soon as
+    // packets arrive in decoder order.
+    try { vTrx.receiver.playoutDelayHint = 0; } catch {}
+    try { aTrx.receiver.playoutDelayHint = 0; } catch {}
+    try { vTrx.receiver.jitterBufferTarget = 0; } catch {}
+    try { aTrx.receiver.jitterBufferTarget = 0; } catch {}
+    pc.ontrack = (ev) => {
+      // First track event populates the <video>'s MediaStream. Subsequent
+      // events (e.g. audio after video) just add to the same stream.
+      if (entry.video.srcObject !== ev.streams[0]) {
+        entry.video.srcObject = ev.streams[0];
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      console.debug('avio WHEP state:', pc.connectionState);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        // Auto-reconnect on failure — common after the sidecar kicks ffmpeg
+        // during a source switch.
+        setTimeout(() => {
+          if (entry.pc === pc) {
+            try { pc.close(); } catch {}
+            entry.pc = null;
+            entry.starting = false;
+            if (entry.video.isConnected) startAvioWhep(entry).catch(() => {});
+          }
+        }, 1500);
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    // Wait for ICE gathering to complete so the offer SDP carries all our
+    // candidates. go2rtc's WHEP doesn't support trickle ICE.
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === 'complete') return resolve();
+      const handler = () => {
+        if (pc.iceGatheringState === 'complete') {
+          pc.removeEventListener('icegatheringstatechange', handler);
+          resolve();
+        }
+      };
+      pc.addEventListener('icegatheringstatechange', handler);
+      // Hard timeout — if ICE never completes (firewall, etc.) we still send
+      // what we have. Browser handles trickle internally if go2rtc cooperates.
+      setTimeout(resolve, 1500);
+    });
+
+    const res = await fetch(entry.whepUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }),
+    });
+    if (!res.ok) throw new Error(`WHEP ${res.status}: ${await res.text()}`);
+    const answer = await res.json();
+    await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+    entry.pc = pc;
+  } finally {
+    entry.starting = false;
+  }
 }
 
 function renderSimpleDeviceBody(device) {
@@ -2657,6 +2987,97 @@ function recorderNameShort(name) {
   return base.replace(/\s*Camera\s*$/i, '').trim() || base;
 }
 
+// ── DAW recordings list ──────────────────────────────────
+// Multitrack WAVs land in studio_<ts>/ subdirs of the sidecar's outputDir.
+// Backend route /api/daw/:id/recordings reads that dir; here we cache, render
+// a list grouped by session, and provide play/download per file.
+const dawRecList = new Map(); // deviceId -> { fetchedAt, sessions, outputDir }
+
+async function loadDawRecordings(deviceId, force) {
+  const cached = dawRecList.get(deviceId);
+  if (!force && cached && Date.now() - cached.fetchedAt < RECORDINGS_TTL_MS) {
+    return renderDawRecordings(deviceId);
+  }
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/daw/${deviceId}/recordings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    dawRecList.set(deviceId, {
+      fetchedAt: Date.now(),
+      sessions: data.sessions || [],
+      outputDir: data.outputDir || null,
+    });
+    renderDawRecordings(deviceId);
+  } catch (err) {
+    console.warn('failed to load DAW recordings', err);
+  }
+}
+
+function renderDawRecordings(deviceId) {
+  const host = document.getElementById(`daw-recordings-${deviceId}`);
+  if (!host) return;
+  const cached = dawRecList.get(deviceId);
+  const sessions = cached?.sessions || [];
+  if (sessions.length === 0) {
+    host.innerHTML = `
+      <div class="pearl-recordings-header">
+        <span class="pearl-recordings-title">&#9655; Recent Recordings</span>
+        <button class="pearl-rec-refresh" onclick="loadDawRecordings('${deviceId}', true)">&#8635; Refresh</button>
+      </div>
+      <div class="pearl-recordings-empty">No multitrack recordings yet. Hit REC to start.</div>`;
+    return;
+  }
+  const fileTotal = sessions.reduce((s, sess) => s + sess.files.length, 0);
+  host.innerHTML = `
+    <div class="pearl-recordings-header">
+      <span class="pearl-recordings-title">&#9655; Recent Recordings (${fileTotal} file${fileTotal === 1 ? '' : 's'} · ${sessions.length} session${sessions.length === 1 ? '' : 's'})</span>
+      <button class="pearl-rec-refresh" onclick="loadDawRecordings('${deviceId}', true)">&#8635; Refresh</button>
+    </div>
+    <div class="pearl-recordings-list">
+      ${sessions.slice(0, 6).map((sess) => `
+        <div class="pearl-session">
+          <div class="pearl-session-head">
+            <span class="pearl-session-when">${new Date(sess.createdMs).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+            <span class="pearl-session-meta">${formatHMS(sess.durationSec || 0)} · ${(sess.totalBytes / 1e6).toFixed(1)} MB · ${sess.files.length} track${sess.files.length === 1 ? '' : 's'}</span>
+          </div>
+          <div class="pearl-session-files">
+            ${sess.files.map((f) => {
+              const url = `${BACKEND_URL}/api/daw/${deviceId}/recordings/${encodeURIComponent(sess.name)}/${encodeURIComponent(f.name)}`;
+              const display = f.name.replace(/\.wav$/i, '');
+              return `
+                <button class="pearl-file-btn" onclick="playDawFile('${deviceId}', ${JSON.stringify(sess.name).replace(/"/g, '&quot;')}, ${JSON.stringify(f.name).replace(/"/g, '&quot;')})">
+                  &#9658; ${display}
+                </button>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
+function playDawFile(deviceId, sessionName, fileName) {
+  const url = `${BACKEND_URL}/api/daw/${deviceId}/recordings/${encodeURIComponent(sessionName)}/${encodeURIComponent(fileName)}`;
+  const dl  = `${url}?download=1`;
+  let modal = document.getElementById('pearl-player-modal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'pearl-player-modal';
+  modal.innerHTML = `
+    <div class="pearl-player-backdrop" onclick="this.parentElement.remove()"></div>
+    <div class="pearl-player-card">
+      <div class="pearl-player-head">
+        <span>${fileName.replace(/\.wav$/i, '')} <span style="color:var(--text-muted); font-size:11px; margin-left:8px;">${sessionName.replace(/^studio_/, '')}</span></span>
+        <button class="pearl-player-close" onclick="this.closest('#pearl-player-modal').remove()">&times;</button>
+      </div>
+      <audio controls autoplay src="${url}" style="width:100%;"></audio>
+      <div class="pearl-player-foot">
+        <a class="ctrl-btn ctrl-btn-blue" href="${dl}" download style="text-decoration:none;">&#11015; Download</a>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
 function playPearlFile(deviceId, recorderId, fileId, displayName) {
   const url = `${BACKEND_URL}/api/pearl/${deviceId}/recordings/${recorderId}/${fileId}/stream`;
   let modal = document.getElementById('pearl-player-modal');
@@ -2696,7 +3117,11 @@ function attachPersistentCamImgs() {
       img.className = 'cam-preview';
       img.alt = 'Live preview';
       img.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#000;';
-      img.src = `${BACKEND_URL}/api/canon/${id}/mjpeg`;
+      // Slot can override the stream URL via data-stream-url (used by the
+      // AV.io capture-card tile to point at /api/avio/<id>/mjpeg instead of
+      // the Canon endpoint). Default keeps the Canon behavior so existing
+      // camera cards continue to work unchanged.
+      img.src = slot.dataset.streamUrl || `${BACKEND_URL}/api/canon/${id}/mjpeg`;
       img.onerror = () => {
         img.style.display = 'none';
         const ph = img.nextElementSibling;
@@ -2751,10 +3176,16 @@ function render() {
       renderDashboard();
     }
     attachPersistentCamImgs();
+    attachPersistentAvioImgs();
     // Populate Pearl recording lists for any Pearl cards on screen.
     document.querySelectorAll('[id^="pearl-recordings-"]').forEach((el) => {
       const id = el.id.replace('pearl-recordings-', '');
       loadPearlRecordings(id, false);
+    });
+    // Populate DAW recording lists for any DAW cards on screen.
+    document.querySelectorAll('[id^="daw-recordings-"]').forEach((el) => {
+      const id = el.id.replace('daw-recordings-', '');
+      loadDawRecordings(id, false);
     });
   }, 80);
 }
@@ -2833,6 +3264,12 @@ async function bootstrap() {
 
     socket.on('device:update', ({ campusId, roomId, device }) => {
       const prev = findDeviceInConfig(campusId, roomId, device.id);
+      // Detect a recording stop — the just-finished session needs to appear in
+      // the Recent Recordings list without the user clicking Refresh. Force a
+      // cache bypass so the new dir shows up immediately.
+      if (device.type === 'daw' && prev?.recording?.active && !device.recording?.active) {
+        loadDawRecordings(device.id, true);
+      }
       if (patchDeviceInConfig(campusId, roomId, device)) {
         // Level-meter ticks arrive at 20 Hz. A full render() every time both
         // flickers the whole page and eats clicks on transient buttons (camera

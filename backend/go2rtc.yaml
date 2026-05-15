@@ -1,0 +1,35 @@
+# go2rtc configuration — RTSP→WebRTC bridge for the AV.io 4K capture card.
+#
+# The sidecar's ffmpeg (running inside the StudioDAWSidecar bundle for TCC
+# camera permission) pushes the AV.io feed as an RTSP stream to
+# rtsp://127.0.0.1:8554/avio. go2rtc relays that into the browser as
+# WebRTC at /api/whep?src=avio, with hardware H.264 decode in the
+# browser's <video> element. End-to-end latency: ~50-100ms.
+#
+# Stream `avio` is left without a source — that turns it into a passive
+# slot that accepts RTSP pushes from outside. The sidecar publishes to
+# it; the WHEP endpoint streams it to browser viewers.
+
+api:
+  listen: 127.0.0.1:1984
+  origin: '*'   # allow our backend to proxy requests through
+
+rtsp:
+  listen: 127.0.0.1:8554
+
+# WebRTC needs a media port reachable by the browser. For local clients
+# this is fine on 127.0.0.1; if you serve to LAN clients, switch listen
+# to 0.0.0.0:8555/tcp/udp or set candidates to the LAN IP.
+webrtc:
+  listen: ':8555'
+  candidates:
+    - stun
+
+streams:
+  avio: ~   # no source: stream accepts incoming RTSP push
+
+# go2rtc uses ffmpeg internally for /api/frame.jpeg snapshots (H.264 → JPEG)
+# and for stream transcoding. Pin to the bundled binary so it doesn't try
+# system PATH (which doesn't include our static install).
+ffmpeg:
+  bin: /Users/greenteam/Projects/classroom-dashboard/bin/ffmpeg

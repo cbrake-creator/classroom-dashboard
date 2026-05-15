@@ -61,6 +61,56 @@ if not OUTPUT_DIR.is_absolute():
 LEVELS_HZ = env_int("LEVELS_HZ", 20)
 LOG_LEVEL = env("LOG_LEVEL", "info").upper()
 
+# ── AV.io 4K capture (HDMI 1 program output from the Epiphan Pearl) ──
+# The sidecar's TCC bundle has NSCameraUsageDescription so ffmpeg subprocesses
+# launched from this daemon inherit camera access via the bundle's identity.
+# That's the whole reason the AV.io capture lives here instead of in the
+# backend — the backend runs under launchd without bundle-scoped TCC, so any
+# ffmpeg it spawned directly would silently hang on AVFoundation device access.
+#
+# Architecture: ffmpeg captures from AV.io via AVFoundation and pushes the
+# encoded H.264 stream as RTSP to a local go2rtc instance. go2rtc translates
+# the RTSP stream into WebRTC (via WHEP) for the browser, which gives us
+# OBS-tier latency (~50-100ms end-to-end) with hardware H.264 decode in the
+# <video> element. The previous JPEG/HTTP-polling path was dropped because
+# Chrome dropped multipart/x-mixed-replace support in <img> and per-frame
+# HTTP polling capped latency at ~150-250ms.
+AVIO_HTTP_PORT = env_int("AVIO_HTTP_PORT", 3301)
+AVIO_FFMPEG_BIN = env("AVIO_FFMPEG_BIN",
+                      str(Path(__file__).parent.parent / "bin" / "ffmpeg"))
+AVIO_AVFOUNDATION_INDEX = env("AVIO_AVFOUNDATION_INDEX", "AV.io 4K Video")
+# ↑ AVFoundation accepts either an integer index OR the device's name. We use
+# the name because USB unplug/replug cycles (firmware updates, hub flakiness,
+# etc.) reorder the index list — and after several such cycles, "0" stops
+# being AV.io and becomes whatever video device was discovered first (often
+# the Mac's built-in webcam or a Studio Display's camera). Pinning by name
+# survives reorderings as long as AV.io reports the same device name to
+# AVFoundation, which it has across all firmware versions we've seen.
+# If AV.io is unplugged entirely, ffmpeg fails open with a clear error
+# ("Configuration of video device failed") rather than silently capturing
+# the wrong device.
+AVIO_FRAMERATE = env_int("AVIO_FRAMERATE", 30)   # AV.io 4K firmware 4.0.0 dropped
+                                                  # 60fps from its USB mode list — the
+                                                  # max it advertises at 1080p is 30fps.
+                                                  # We were briefly at 60 with firmware
+                                                  # 3.2 (and only realized ~27 due to
+                                                  # USB negotiation) but 4.0 won't even
+                                                  # accept the request. Setting 60 here
+                                                  # would cause ffmpeg to fail-open with
+                                                  # Input/output error against the 4.0
+                                                  # firmware.
+AVIO_WIDTH = env_int("AVIO_WIDTH", 1920)         # Pin AVFoundation to ask the
+AVIO_HEIGHT = env_int("AVIO_HEIGHT", 1080)       # device for 1920x1080 directly.
+                                                  # Without -video_size, AVFoundation
+                                                  # was picking the AV.io's 4K DCI
+                                                  # mode (4096x2160) and AV.io was
+                                                  # internally upscaling Pearl's
+                                                  # 1080p signal to 4K — saturating
+                                                  # USB 3 bandwidth (~530 MB/s) and
+                                                  # capping realized capture at ~13 fps.
+AVIO_RTSP_URL = env("AVIO_RTSP_URL", "rtsp://127.0.0.1:8554/avio")
+AVIO_BITRATE_KBPS = env_int("AVIO_BITRATE_KBPS", 8000)   # bumped for 1080p quality at libx264 veryfast
+
 # Which channels to actually write to disk. Format: "<ch>:<name>,<ch>:<name>..."
 # where <ch> is the 1-based channel number and <name> is the filename stem.
 # If empty, the sidecar writes one WAV per channel (all CHANNELS channels).
@@ -110,36 +160,67 @@ if RECORD_CHANNELS:
 else:
     log.info("RECORD_CHANNELS not set — saving all %d channels", CHANNELS)
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Best-effort: pre-create OUTPUT_DIR so the dashboard's first record-start has
+# somewhere obvious to write. If this fails (e.g. an unmounted external drive
+# in sidecar.env), don't crash — the per-record pre-flight will surface a
+# structured error to the dashboard later.
+try:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as e:
+    log.warning("OUTPUT_DIR not creatable at startup (%s); record-start will retry and report errors", e)
 
 
 # ─── Audio device lookup ─────────────────────────────────────
+# State for "log on transition only". The supervisor polls find_input_device()
+# every second; without this we'd spam the log either with a match (boring) or
+# with a mismatch + full input enumeration (very loud).
+_last_device_match_log: dict[str, object] = {"present": None, "logged_inputs": False}
+
+
 def find_input_device() -> Optional[int]:
     """Return the sounddevice index for the first INPUT device whose name
-    contains AUDIO_DEVICE_MATCH (case-insensitive)."""
+    contains AUDIO_DEVICE_MATCH (case-insensitive). Logs only on state changes
+    so the supervisor can poll cheaply."""
     match = AUDIO_DEVICE_MATCH.lower()
+    found_idx: Optional[int] = None
+    found_dev = None
     for i, dev in enumerate(sd.query_devices()):
         if dev["max_input_channels"] < 1:
             continue
         if match in dev["name"].lower():
+            found_idx = i
+            found_dev = dev
+            break
+
+    was_present = _last_device_match_log["present"]
+    if found_idx is not None:
+        if was_present is not True:
             log.info("matched input device %d: %s (%d in / %d out)",
-                     i, dev["name"], dev["max_input_channels"], dev["max_output_channels"])
-            return i
-    log.error("no input device matched %r. Available inputs:", AUDIO_DEVICE_MATCH)
-    for i, dev in enumerate(sd.query_devices()):
-        if dev["max_input_channels"] >= 1:
-            log.error("  [%d] %s (%d in)", i, dev["name"], dev["max_input_channels"])
+                     found_idx, found_dev["name"],
+                     found_dev["max_input_channels"], found_dev["max_output_channels"])
+            _last_device_match_log["present"] = True
+            _last_device_match_log["logged_inputs"] = False
+        return found_idx
+
+    if was_present is not False:
+        log.error("no input device matched %r. Available inputs:", AUDIO_DEVICE_MATCH)
+        for i, dev in enumerate(sd.query_devices()):
+            if dev["max_input_channels"] >= 1:
+                log.error("  [%d] %s (%d in)", i, dev["name"], dev["max_input_channels"])
+        _last_device_match_log["present"] = False
+        _last_device_match_log["logged_inputs"] = True
     return None
 
 
 # ─── macOS microphone permission ─────────────────────────────
 # When launchd spawns the sidecar, CoreAudio silently returns zero buffers if
-# TCC hasn't granted microphone access — and launchd-spawned processes don't
-# automatically get a permission dialog. Explicitly asking via AVFoundation
-# forces macOS to render the prompt (and remembers the answer thereafter).
-def ensure_macos_mic_permission() -> None:
+# TCC hasn't granted microphone access. The Swift shim at the bundle's main
+# binary is what actually triggers the dialog (it owns the bundle's TCC
+# identity); this function is here as a status check so we can surface
+# mic_state in health-state events to the dashboard.
+def check_macos_mic_permission() -> str:
     if sys.platform != "darwin":
-        return
+        return "n/a"
     try:
         from AVFoundation import (  # type: ignore
             AVCaptureDevice,
@@ -147,48 +228,22 @@ def ensure_macos_mic_permission() -> None:
             AVAuthorizationStatusAuthorized,
             AVAuthorizationStatusDenied,
             AVAuthorizationStatusRestricted,
+            AVAuthorizationStatusNotDetermined,
         )
-        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory  # type: ignore
-        from Foundation import NSRunLoop, NSDate  # type: ignore
     except ImportError as e:
-        log.info("pyobjc frameworks missing (%s) — skipping mic permission request", e)
-        return
+        log.info("pyobjc frameworks missing (%s) — skipping mic permission check", e)
+        return "unknown"
 
     status = AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio)
     if status == AVAuthorizationStatusAuthorized:
-        log.info("mic permission: granted")
-        return
+        return "granted"
     if status == AVAuthorizationStatusDenied:
-        log.error("mic permission: DENIED — grant it in System Settings → Privacy & Security → Microphone, then relaunch")
-        return
+        return "denied"
     if status == AVAuthorizationStatusRestricted:
-        log.error("mic permission: restricted by policy")
-        return
-
-    # NotDetermined: TCC needs a running NSApplication to render the dialog.
-    # Without this, requestAccess silently auto-denies (we saw it return in
-    # ~5ms with no dialog on screen). Accessory activation policy keeps us
-    # out of the Dock while still having a valid UI context.
-    log.info("mic permission: not determined — requesting (dialog should appear)")
-    app = NSApplication.sharedApplication()
-    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-
-    done = threading.Event()
-    granted_flag = {"ok": False}
-    def _handler(granted):
-        granted_flag["ok"] = bool(granted)
-        done.set()
-    AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeAudio, _handler)
-
-    # Pump the NSApp run loop until the user answers (or a timeout fires). The
-    # dialog can't render if the main thread never yields to Cocoa.
-    deadline = time.time() + 60
-    while not done.is_set() and time.time() < deadline:
-        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
-    if done.is_set():
-        log.info("mic permission: %s", "granted" if granted_flag["ok"] else "denied")
-    else:
-        log.warning("mic permission: request timed out after 60s (no dialog or no response?)")
+        return "restricted"
+    if status == AVAuthorizationStatusNotDetermined:
+        return "not-determined"
+    return "unknown"
 
 
 # ─── Recording state ─────────────────────────────────────────
@@ -210,8 +265,52 @@ current_rec: Optional[Recording] = None
 
 # Output directory is mutable at runtime — the dashboard UI can set it via
 # the 'output-dir' cmd. Reads/writes must hold output_dir_lock.
+#
+# Runtime overrides persist to STATE_FILE so a daemon restart (KeepAlive
+# respawn, sleep/wake recovery, manual bounce) doesn't silently revert the
+# user's chosen folder back to the sidecar.env default. Without this, setting
+# the output folder via the dashboard appears to work but vanishes on the
+# next process restart.
+STATE_FILE = Path.home() / "Library/Application Support/studio-daw-sidecar/state.json"
+
+
+def _load_state() -> dict:
+    try:
+        import json
+        with open(STATE_FILE, "r") as f:
+            return json.load(f) or {}
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+
+
+def _save_state(patch: dict) -> None:
+    """Merge `patch` into the persisted state file. Best-effort — never raises."""
+    try:
+        import json
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        current = _load_state()
+        current.update(patch)
+        tmp = STATE_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(current, f, indent=2)
+        tmp.replace(STATE_FILE)
+    except Exception as e:
+        log.warning("could not persist state: %s", e)
+
+
 output_dir_lock = threading.Lock()
-active_output_dir: Path = OUTPUT_DIR
+# Initialize from persisted state if present, else fall back to env default.
+_persisted_output_dir = _load_state().get("output_dir")
+if _persisted_output_dir:
+    try:
+        active_output_dir: Path = Path(_persisted_output_dir).expanduser()
+        if not active_output_dir.is_absolute():
+            active_output_dir = Path.home() / active_output_dir
+        log.info("restored output dir from state: %s", active_output_dir)
+    except Exception:
+        active_output_dir = OUTPUT_DIR
+else:
+    active_output_dir: Path = OUTPUT_DIR
 
 
 def _safe_name(s: str) -> str:
@@ -224,18 +323,54 @@ def _safe_name(s: str) -> str:
     return out.strip('-') or 'ch'
 
 
+class RecordingPreflightError(Exception):
+    """Raised when start_recording can't proceed — surfaced to the dashboard
+    as a structured record-event error instead of bubbling silently."""
+
+
+# Refuse to start a recording if free space drops below this threshold. 14
+# channels * 48 kHz * 24-bit = ~2 MB/sec, so 500 MB ≈ 4 min of headroom — well
+# above any realistic session length and small enough that healthy disks pass.
+MIN_FREE_BYTES = 500 * 1024 * 1024
+
+
+def _preflight_output_dir(out_base: Path) -> None:
+    """Validate the destination dir before we start opening WAV writers.
+    Raises RecordingPreflightError with a human-readable message on failure."""
+    import shutil
+    try:
+        out_base.mkdir(parents=True, exist_ok=True)
+    except PermissionError as e:
+        raise RecordingPreflightError(f"output dir not writable: {out_base} ({e})")
+    except OSError as e:
+        raise RecordingPreflightError(f"could not create output dir {out_base}: {e}")
+    if not os.access(out_base, os.W_OK):
+        raise RecordingPreflightError(f"output dir not writable: {out_base}")
+    try:
+        usage = shutil.disk_usage(out_base)
+    except OSError as e:
+        raise RecordingPreflightError(f"could not stat disk for {out_base}: {e}")
+    if usage.free < MIN_FREE_BYTES:
+        raise RecordingPreflightError(
+            f"only {usage.free // (1024*1024)} MB free at {out_base} — refuse to start recording (need >= {MIN_FREE_BYTES // (1024*1024)} MB)"
+        )
+
+
 def start_recording() -> Path:
     global current_rec
     with rec_lock:
         if current_rec is not None:
             log.info("record-start ignored; already recording -> %s", current_rec.dir)
             return current_rec.dir
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         with output_dir_lock:
             out_base = active_output_dir
-        out_base.mkdir(parents=True, exist_ok=True)
+        _preflight_output_dir(out_base)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         session_dir = out_base / f"studio_{stamp}"
-        session_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise RecordingPreflightError(f"could not create session dir {session_dir}: {e}")
 
         # Build the (channel_index, filename) list.
         if RECORD_CHANNELS:
@@ -255,11 +390,11 @@ def start_recording() -> Path:
                     samplerate=SAMPLE_RATE, channels=1,
                     subtype="PCM_24", format="WAV",
                 )))
-        except Exception:
+        except Exception as e:
             for _, w in writers:
                 try: w.close()
                 except Exception: pass
-            raise
+            raise RecordingPreflightError(f"could not open WAV writers in {session_dir}: {e}")
         current_rec = Recording(dir=session_dir, writers=writers, started_at=time.time())
         log.info("recording started: %s (%d files)", session_dir, len(writers))
         return session_dir
@@ -298,7 +433,8 @@ def write_frames(frames: np.ndarray) -> None:
 
 def set_output_dir(path_str: str) -> Path:
     """Update where future recordings are saved. A recording already in
-    progress continues in its original directory."""
+    progress continues in its original directory. Persisted to STATE_FILE so
+    the choice survives a daemon restart."""
     global active_output_dir
     p = Path(path_str).expanduser()
     if not p.is_absolute():
@@ -306,7 +442,8 @@ def set_output_dir(path_str: str) -> Path:
     with output_dir_lock:
         active_output_dir = p
     p.mkdir(parents=True, exist_ok=True)
-    log.info("output dir set to: %s", p)
+    _save_state({"output_dir": str(p)})
+    log.info("output dir set to: %s (persisted)", p)
     return p
 
 
@@ -316,8 +453,47 @@ def set_output_dir(path_str: str) -> Path:
 latest_peaks = np.zeros(CHANNELS, dtype=np.float32)
 peaks_lock = threading.Lock()
 
+# Watchdog: when the RØDECaster is unplugged mid-stream, sounddevice may stop
+# delivering callbacks entirely (no status, no error — just silence). The
+# supervisor loop in main() compares time.time() against this timestamp and
+# tears down the stream if it goes stale.
+last_callback_at: float = 0.0
+last_peak_at: float = 0.0
+
+# Partial-stream detection: track which channels have *ever* delivered a
+# non-zero sample since the current stream was opened. Reset to all-False in
+# the supervisor every time it opens a new stream. Catches the boot-transient
+# case where the RØDECaster gets captured before its USB engine fully wakes,
+# leaving only ch1 delivering for the lifetime of the stream.
+channels_with_audio = np.zeros(CHANNELS, dtype=bool)
+channels_with_audio_lock = threading.Lock()
+
+# Continuous partial-stream detection: per-channel timestamp of the last
+# non-zero sample. Catches mid-stream degradation that the boot-transient
+# detector misses — e.g. RØDECaster power-button-off while USB stays
+# enumerated, which keeps callbacks firing but only on ch1 (the chat
+# passthrough / monitor mix). The supervisor's watchdog reads this every
+# second and tears down if the "channels active in the last 10s" count is
+# stuck at 1 for too long.
+last_active_at = np.zeros(CHANNELS, dtype=np.float64)
+last_active_at_lock = threading.Lock()
+
+
+def _push_health_now() -> None:
+    """Emit a state patch immediately. Called on every tear-down so the
+    dashboard's deviceState pill updates within ~50ms instead of waiting for
+    the next health_loop tick (~2s)."""
+    try:
+        if sio.connected:
+            sio.emit("state", {"patch": _health_patch()}, namespace="/sidecar")
+    except Exception:
+        pass
+
 
 def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
+    global last_callback_at, last_peak_at
+    now = time.time()
+    last_callback_at = now
     if status:
         log.debug("audio status: %s", status)
     # indata shape = (frames, channels)
@@ -330,9 +506,19 @@ def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
         indata = indata[:, :CHANNELS]
 
     peaks = np.max(np.abs(indata), axis=0)
+    if float(peaks.max()) > 0:
+        last_peak_at = last_callback_at
     with peaks_lock:
         # Keep the larger of incoming vs retained — decays slowly on the next tick.
         np.maximum(latest_peaks, peaks, out=latest_peaks)
+    # Mark which channels delivered a non-zero sample. Cumulative since-open
+    # for channels_with_audio (boot-transient detection); per-channel
+    # timestamp for last_active_at (continuous degradation detection).
+    active_now = np.any(indata != 0, axis=0)
+    with channels_with_audio_lock:
+        np.logical_or(channels_with_audio, active_now, out=channels_with_audio)
+    with last_active_at_lock:
+        last_active_at[active_now] = now
 
     # If recording, write through
     if current_rec is not None:
@@ -361,8 +547,11 @@ sio = socketio.Client(
 @sio.event(namespace="/sidecar")
 def connect() -> None:
     log.info("connected to dashboard /sidecar")
-    # Send hello with full device descriptor.
-    device_name = sd.query_devices(find_input_device())["name"] if find_input_device() is not None else "unknown"
+    # Send hello with full device descriptor. find_input_device() may log noise
+    # if the RØDECaster is currently unplugged — that's fine, hello goes out
+    # either way and the dashboard sees a 'sidecar online, capture missing' state.
+    idx = find_input_device()
+    device_name = sd.query_devices(idx)["name"] if idx is not None else "unknown"
     with output_dir_lock:
         cur_dir = str(active_output_dir)
     sio.emit(
@@ -379,6 +568,12 @@ def connect() -> None:
         },
         namespace="/sidecar",
     )
+    # Push initial health snapshot so the dashboard doesn't have to wait for the
+    # next health_loop tick.
+    try:
+        sio.emit("state", {"patch": _health_patch()}, namespace="/sidecar")
+    except Exception:
+        pass
 
 
 @sio.event(namespace="/sidecar")
@@ -398,7 +593,12 @@ def on_cmd(payload: dict) -> None:
     log.info("cmd: %s args=%s", op, args)
     try:
         if op == "record-start":
-            path = start_recording()
+            try:
+                path = start_recording()
+            except RecordingPreflightError as e:
+                log.error("record-start refused: %s", e)
+                emit_record_state(active=False, output_path=None, error=str(e))
+                return
             emit_record_state(active=True, output_path=str(path))
         elif op == "record-stop":
             path = stop_recording()
@@ -427,13 +627,14 @@ def on_cmd(payload: dict) -> None:
         log.exception("cmd handler error: %s", e)
 
 
-def emit_record_state(*, active: bool, output_path: Optional[str] = None) -> None:
+def emit_record_state(*, active: bool, output_path: Optional[str] = None, error: Optional[str] = None) -> None:
     rec = current_rec
     payload = {
         "active": active,
         "startedAt": int(rec.started_at * 1000) if rec else None,
         "durationSec": (time.time() - rec.started_at) if rec else 0,
         "outputPath": output_path,
+        "error": error,
     }
     sio.emit("record", payload, namespace="/sidecar")
 
@@ -462,25 +663,66 @@ def record_heartbeat_loop() -> None:
     dashboard's duration UI stays current."""
     while True:
         time.sleep(0.5)
-        if current_rec is not None and sio.connected:
+        rec = current_rec
+        if rec is not None and sio.connected:
             try:
-                emit_record_state(active=True, output_path=str(current_rec.path))
+                emit_record_state(active=True, output_path=str(rec.dir))
             except Exception:
                 pass
 
 
-def main() -> int:
-    # Request mic access BEFORE opening any CoreAudio streams. When launchd
-    # starts us fresh, this is what triggers the on-screen TCC prompt; once
-    # the user approves, subsequent launches skip straight past this.
-    ensure_macos_mic_permission()
+# ─── Health surface ──────────────────────────────────────────
+# Module state that the supervisor writes and health_loop emits. The dashboard
+# uses this to show whether the sidecar is healthy beyond just "connected".
+mic_state: str = "unknown"           # granted | denied | restricted | not-determined | unknown | n/a
+device_state: str = "unknown"        # present | missing | unknown
+shutdown_event = threading.Event()
 
-    idx = find_input_device()
-    if idx is None:
-        return 2
 
-    # Start the input stream in the background.
-    stream = sd.InputStream(
+def _health_patch() -> dict:
+    age_ms = None
+    if last_peak_at:
+        age_ms = max(0, int((time.time() - last_peak_at) * 1000))
+    with channels_with_audio_lock:
+        ch_audio = int(channels_with_audio.sum())
+    return {
+        "micState": mic_state,
+        "deviceState": device_state,
+        "lastPeakAgeMs": age_ms,
+        "recordingActive": current_rec is not None,
+        # Cumulative count of channels that have delivered any non-zero sample
+        # since the current stream was opened. Lets the dashboard distinguish
+        # "audio capture running" from "audio capture running but only on ch1
+        # because the device was caught mid-boot."
+        "channelsWithAudio": ch_audio,
+        "channelsRequested": CHANNELS,
+    }
+
+
+def health_loop() -> None:
+    """Push a state patch every 2s so the dashboard reflects mic/device health
+    without each side having to poll the other."""
+    while not shutdown_event.is_set():
+        time.sleep(2)
+        if not sio.connected:
+            continue
+        try:
+            sio.emit("state", {"patch": _health_patch()}, namespace="/sidecar")
+        except Exception:
+            pass
+
+
+# ─── Audio supervisor ────────────────────────────────────────
+# Owns the InputStream's lifecycle. If the device is missing on startup, we
+# wait for it. If the device is yanked mid-stream (callback goes silent), we
+# tear down + reopen. The socket connection survives all of this — meters
+# freeze at -120 client-side and recover when audio comes back.
+audio_lock = threading.Lock()
+audio_stream: Optional[sd.InputStream] = None
+
+
+def _open_stream(idx: int) -> sd.InputStream:
+    s = sd.InputStream(
         device=idx,
         channels=CHANNELS,
         samplerate=SAMPLE_RATE,
@@ -488,20 +730,579 @@ def main() -> int:
         blocksize=0,
         callback=audio_callback,
     )
-    stream.start()
-    log.info("audio capture running: device=%s sr=%d ch=%d", idx, SAMPLE_RATE, CHANNELS)
+    s.start()
+    return s
 
+
+def _close_stream(s: Optional[sd.InputStream]) -> None:
+    if s is None:
+        return
+    try: s.stop()
+    except Exception: pass
+    try: s.close()
+    except Exception: pass
+
+
+def _reset_portaudio(quiet: bool = False) -> None:
+    """Reset sounddevice's PortAudio session. After macOS sleep/wake or any
+    InputStream open that returns paInternalError (-9986), PortAudio's cached
+    device descriptors get poisoned — every subsequent open in the same
+    process fails the same way even though a fresh process opens fine.
+    Terminate + initialize forces PortAudio to re-enumerate from CoreAudio.
+
+    Called in two distinct modes:
+      - Loud (default): on watchdog tear-down / open failure / partial stream.
+        Logs "PortAudio session reset" and clears the transition-log cache so
+        the next find_input_device() will re-announce the state.
+      - Quiet (quiet=True): during the missing-device poll loop, where we
+        reset every 2s to keep PortAudio's device list fresh for USB hot-plug
+        detection. Logging would spam; we want a clean "device came back" log
+        only when state actually changes."""
+    try:
+        sd._terminate()
+        sd._initialize()
+        if not quiet:
+            # Drop our own transition-log cache so the next find_input_device()
+            # reports the fresh state instead of inheriting "present" from before.
+            _last_device_match_log["present"] = None
+            _last_device_match_log["logged_inputs"] = False
+            log.info("PortAudio session reset")
+    except Exception as e:
+        log.warning("PortAudio reset failed: %s", e)
+
+
+def audio_supervisor_loop() -> None:
+    """Keep an InputStream open while a matching device is present; back off
+    and retry while it isn't.
+
+    The macOS sleep/wake gotcha lurks in two places: (1) `sd.InputStream(...)`
+    fails with paInternalError -9986 because PortAudio's session is poisoned,
+    and (2) `sd.query_devices()` returns a stale device list that doesn't
+    include the RØDECaster even after it's plugged back in. Both require a
+    full PortAudio terminate+initialize to recover. The supervisor calls
+    _reset_portaudio() on every transition from a working stream to a
+    searching state so the next find_input_device() sees fresh truth."""
+    global audio_stream, device_state, last_callback_at
+    backoff = 1.0
+    consecutive_open_failures = 0
+    consecutive_missing = 0
+    just_torn_down = False  # True for one iteration after the watchdog killed a stream
+    while not shutdown_event.is_set():
+        # If we just tore down a stream, reset PortAudio before re-querying.
+        # The most common stale-device-list trigger (Mac sleep) ALSO trips the
+        # watchdog, so this single reset covers both failure modes.
+        if just_torn_down:
+            _reset_portaudio()
+            just_torn_down = False
+
+        idx = find_input_device()
+        if idx is None:
+            device_state = "missing"
+            consecutive_missing += 1
+            # PortAudio caches its device list per session, so sd.query_devices()
+            # can't see a freshly-plugged USB device without a reset. Reset
+            # every iteration while the device is missing — the cost (~50ms
+            # for _terminate + _initialize) is far cheaper than the user
+            # waiting 2+ minutes for the next chance at hot-plug detection.
+            # Skip on iteration 1 because we just reset in the just_torn_down
+            # branch above (no point doing it twice in a row). Quiet=True so
+            # the log doesn't spam "PortAudio session reset" every 2s; the
+            # one-shot "matched input device" log will still fire when state
+            # changes from missing→present.
+            if consecutive_missing >= 2:
+                _reset_portaudio(quiet=True)
+            # Final safety net: if we've been stuck "missing" for ~10 min
+            # despite resets, exit non-zero. launchd's KeepAlive will respawn
+            # a fresh process, which is the strongest possible PortAudio
+            # reset (and recovers from any unknown-unknown stuck state).
+            # 60 iterations at 2s sleeps = ~2 min, well under the original
+            # 10-15 min budget but still long enough that transient outages
+            # don't trigger a process restart.
+            if consecutive_missing >= 300:  # ~10 min at 2s sleeps
+                log.error("device missing for %d retries — exiting so launchd can respawn", consecutive_missing)
+                shutdown_event.set()
+                # Don't sys.exit() from this thread — set the event and let
+                # main return so signal handlers / shutdown order run cleanly.
+                os._exit(1)
+            # Fixed 2s poll instead of exponential backoff — USB hot-plug
+            # should be detected within ~3 seconds of the user replugging.
+            time.sleep(2.0)
+            continue
+        consecutive_missing = 0
+
+        try:
+            with audio_lock:
+                _close_stream(audio_stream)
+                # Reset the per-channel sample-seen tracker so the partial-stream
+                # check below only counts samples from THIS open onward.
+                with channels_with_audio_lock:
+                    channels_with_audio[:] = False
+                # Reset per-channel last-active timestamps so the continuous
+                # partial-stream watchdog starts counting from this open.
+                with last_active_at_lock:
+                    last_active_at[:] = 0.0
+                audio_stream = _open_stream(idx)
+                last_callback_at = time.time()
+            stream_opened_at = time.time()
+            device_state = "present"
+            backoff = 1.0
+            consecutive_open_failures = 0
+            try:
+                dev_name = sd.query_devices(idx)["name"]
+            except Exception:
+                dev_name = AUDIO_DEVICE_MATCH
+            log.info("audio capture running: device=%s (%s) sr=%d ch=%d", idx, dev_name, SAMPLE_RATE, CHANNELS)
+            # Hello only fires on socket connect, which (when the device was
+            # absent at boot) leaves the dashboard showing captureDevice='unknown'
+            # forever. Push the real device name (and a health snapshot) every
+            # time we successfully open a fresh stream so the UI catches up.
+            try:
+                sio.emit("state", {"patch": {
+                    "captureDevice": dev_name,
+                    **_health_patch(),
+                }}, namespace="/sidecar")
+            except Exception:
+                pass
+        except Exception as e:
+            consecutive_open_failures += 1
+            log.warning("failed to open audio stream (%d in a row): %s",
+                        consecutive_open_failures, e)
+            device_state = "missing"
+            # After 2 consecutive failures, assume PortAudio is poisoned and
+            # reset before the next attempt.
+            if consecutive_open_failures >= 2:
+                _reset_portaudio()
+                consecutive_open_failures = 0
+            time.sleep(min(backoff, 15.0))
+            backoff = min(backoff * 1.5, 15.0)
+            continue
+
+        # Watchdog. Three failure modes detected here:
+        #   (a) stale callbacks (no samples at all for >5s) → device unplugged
+        #   (b) device no longer in sd.query_devices() → ditto
+        #   (c) partial stream (only 1 of N channels delivering for too long)
+        #       → RØDECaster powered off via its button while USB stays
+        #       enumerated; only chat/monitor passthrough leaks through ch1.
+        # All three break out to the outer loop, which resets PortAudio and
+        # re-enters the find/open cycle.
+        partial_check_done = False
+        partial_state_since: Optional[float] = None
+        ACTIVE_WINDOW_SEC = 10.0   # how recent a non-zero sample counts as "active"
+        PARTIAL_GRACE_SEC = 15.0   # how long we tolerate partial state before tearing down
+        while not shutdown_event.is_set():
+            time.sleep(1)
+            stale = time.time() - last_callback_at
+            if stale > 5:
+                log.warning("audio callback stale for %.1fs — tearing down stream", stale)
+                with audio_lock:
+                    _close_stream(audio_stream)
+                    audio_stream = None
+                device_state = "missing"
+                _push_health_now()
+                just_torn_down = True
+                break
+            # Also bail if sounddevice can no longer enumerate the device.
+            try:
+                if find_input_device() is None:
+                    log.warning("matching input device no longer enumerable — tearing down")
+                    with audio_lock:
+                        _close_stream(audio_stream)
+                        audio_stream = None
+                    device_state = "missing"
+                    _push_health_now()
+                    just_torn_down = True
+                    break
+            except Exception:
+                pass
+            # (a) one-shot boot-transient check: 5s after open, count channels
+            # that ever delivered a non-zero sample. If we requested CHANNELS
+            # but only one channel ever sent audio, the RØDECaster was likely
+            # captured mid-USB-enumeration; force a clean reopen.
+            if not partial_check_done and time.time() - stream_opened_at > 5:
+                partial_check_done = True
+                with channels_with_audio_lock:
+                    delivered = int(channels_with_audio.sum())
+                if CHANNELS > 1 and delivered == 1:
+                    log.warning(
+                        "partial stream detected at open: only 1/%d channels delivered samples in the first 5s — "
+                        "forcing PortAudio reset + reopen", CHANNELS,
+                    )
+                    with audio_lock:
+                        _close_stream(audio_stream)
+                        audio_stream = None
+                    device_state = "missing"
+                    _push_health_now()
+                    just_torn_down = True
+                    break
+            # (b) continuous degradation check: count channels that have
+            # delivered any non-zero sample in the last ACTIVE_WINDOW_SEC. If
+            # the count stays below PARTIAL_THRESHOLD for PARTIAL_GRACE_SEC,
+            # treat as device-off-USB-alive. This is the RØDECaster-power-
+            # button signature — callbacks keep firing (so the stale-callback
+            # watchdog can't catch it) but only a couple of channels leak audio
+            # (chat passthrough, system-audio bleed via Studio Display Mic, etc.).
+            #
+            # Threshold scales with channel count: for a 14-channel Rodecaster
+            # we expect 8-10 active in steady state, so ≤2 is clearly broken.
+            # For a small (≤4-channel) setup we tighten to ≤1 — a properly-
+            # configured 2-channel stereo capture in a quiet room could
+            # legitimately have only one channel active, and we don't want to
+            # false-trigger.
+            PARTIAL_THRESHOLD = 2 if CHANNELS >= 8 else 1
+            now = time.time()
+            with last_active_at_lock:
+                recent_active = int(np.sum(now - last_active_at < ACTIVE_WINDOW_SEC))
+            if CHANNELS > 1 and recent_active <= PARTIAL_THRESHOLD and recent_active >= 1:
+                if partial_state_since is None:
+                    partial_state_since = now
+                elif now - partial_state_since > PARTIAL_GRACE_SEC:
+                    log.warning(
+                        "partial stream sustained: only %d/%d channels delivered samples for %.0fs "
+                        "(threshold %d) — RØDECaster likely powered off; forcing PortAudio reset + reopen",
+                        recent_active, CHANNELS, now - partial_state_since, PARTIAL_THRESHOLD,
+                    )
+                    with audio_lock:
+                        _close_stream(audio_stream)
+                        audio_stream = None
+                    device_state = "missing"
+                    _push_health_now()
+                    partial_state_since = None
+                    just_torn_down = True
+                    break
+            else:
+                partial_state_since = None
+
+
+# ─── AV.io HTTP server ─────────────────────────────────────
+# The sidecar runs a small loopback HTTP server alongside the audio supervisor.
+# The backend (running under launchd, without bundle-scoped TCC) proxies its
+# /api/avio/* routes to this localhost server. ffmpeg runs inside this daemon
+# as a subprocess, so it inherits the bundle's camera permission via TCC
+# responsibility — which is the whole reason this lives in the sidecar at all.
+#
+# Architecture: ONE long-running ffmpeg subprocess emits JPEGs continuously
+# to stdout via the image2pipe muxer. A reader thread parses each frame and
+# stores the bytes in `latest_frame` (lock-protected). The HTTP /snapshot
+# handler returns the cached bytes in O(1), so the dashboard can poll it
+# every ~100ms without spawning a new ffmpeg per request. This replaces the
+# original "spawn-per-request" model + the mpjpeg endpoint, both of which
+# Chrome's evolving multipart/x-mixed-replace support broke in <img> tags.
+import hashlib
+import http.server
+import socketserver
+import subprocess
+
+
+def _ffmpeg_capture_args() -> list[str]:
+    """Args for the long-running capture subprocess. Encodes AV.io's UYVY422
+    feed as H.264 with VideoToolbox (Apple hardware encoder) and pushes the
+    stream over RTSP to a local go2rtc instance, which exposes it to the
+    browser as WebRTC.
+
+    Low-latency tuning:
+      -g <fps>            keyframe every 1s for fast WebRTC connect-time
+      -bf 0               no B-frames (B-frames need future-frame context →
+                          enforced encode latency); WebRTC clients work better
+                          without them anyway
+      -realtime 1         VideoToolbox flag: encode in realtime mode, dropping
+                          quality before queuing frames
+      -allow_sw 1         fall back to software encode if VT unavailable
+      -rtsp_transport tcp localhost RTSP is reliable; UDP just complicates this
+    """
+    return [
+        AVIO_FFMPEG_BIN,
+        "-nostdin", "-loglevel", "error", "-hide_banner",
+        "-f", "avfoundation",
+        "-framerate", str(AVIO_FRAMERATE),
+        # NV12: 4:2:0 chroma, ~33% less data than UYVY422 over USB. Tested
+        # both formats under firmware 4.0.0 (2026-05-15): they deliver
+        # essentially the same realized framerate (~24 fps NV12 vs ~23 fps
+        # UYVY422), and the encoder produces yuv420p for WebRTC either way
+        # so the 4:2:2-vs-4:2:0 chroma quality difference doesn't visually
+        # materialize. NV12 wins on bandwidth and CPU.
+        "-pixel_format", "nv12",
+        # Pin the resolution to the AV.io's native 1080p mode. Without this,
+        # AVFoundation defaulted to 4K DCI (4096x2160) which forced AV.io to
+        # internally upscale Pearl's 1920x1080 HDMI signal — saturating USB 3
+        # bandwidth and capping us at ~13 fps. Asking for 1920x1080 directly
+        # uses AV.io's pass-through path and unlocks the full 60 fps Pearl
+        # provides.
+        "-video_size", f"{AVIO_WIDTH}x{AVIO_HEIGHT}",
+        # Small queue: enough for jitter absorption, not so large that frames
+        # pile up under back-pressure (was 512 — ~17s of buffer at 30fps).
+        "-thread_queue_size", "16",
+        "-i", AVIO_AVFOUNDATION_INDEX,
+        # Pass each input frame through to the encoder exactly once. Without
+        # this, ffmpeg's default vsync treats -framerate as a CFR output target
+        # and synthesizes thousands of duplicate frames per second when the
+        # device delivers fewer frames than requested — which is what AV.io
+        # does (one good buffer at startup, then near-zero throughput).
+        "-fps_mode", "passthrough",
+        # Scale filter removed — input is now exactly 1920x1080 from
+        # AVFoundation, matching Pearl's HDMI output, so no resampling needed.
+        # libx264 with hand-picked low-latency + quality flags.
+        #
+        # -preset veryfast: real-time-capable preset that ENABLES deblocking,
+        # sub-pixel motion estimation, multiple-reference frames, and trellis
+        # quantization — all of which were OFF in ultrafast and were the
+        # source of visible blockiness/pixelation. veryfast at 1080p on
+        # Apple Silicon still runs faster than realtime with headroom.
+        #
+        # -profile:v main: enables CABAC entropy coding (~15% better quality
+        # at same bitrate vs baseline's CAVLC) and 8x8 DCT. We keep -bf 0 so
+        # no B-frames are introduced — main profile would normally allow them.
+        #
+        # -x264-params sliced-threads=1 is the critical low-latency knob.
+        # x264's default is FRAME-level threading (pipelines ~CPU-count
+        # frames in parallel for throughput), which adds hundreds of ms of
+        # encoder latency. Slice-level threading keeps multi-core throughput
+        # but processes a single frame at a time → near-zero added latency.
+        # aq-mode=1 = variance-based adaptive quantization (better detail
+        # preservation in flat regions). ref=2 = 2 reference frames (slight
+        # compression improvement, negligible latency).
+        #
+        # CRITICAL: we deliberately avoid -tune zerolatency because it also
+        # sets force-cfr=1, which combined with our -fps_mode passthrough
+        # input wedges the encoder onto the first received frame and emits it
+        # forever (observed during debugging: 5/5 byte-identical JPEGs at
+        # ~239 kbps).
+        "-c:v", "libx264",
+        # superfast vs veryfast: same CABAC + deblock + weightp, only diff is
+        # subme (1 vs 2) and slightly less aggressive motion estimation. The
+        # CPU savings let realized fps climb significantly closer to source rate.
+        "-preset", "superfast",
+        "-profile:v", "main",
+        "-x264-params", "sliced-threads=1:sync-lookahead=0:aq-mode=1",
+        "-b:v", f"{AVIO_BITRATE_KBPS}k",
+        # 5% headroom over target keeps motion spikes from running away.
+        "-maxrate", f"{int(AVIO_BITRATE_KBPS * 1.05)}k",
+        # 500k rate-control buffer at 8 Mbps ≈ ~60ms. Tried 250k briefly to
+        # save ~30ms more — caused visible rate-control oscillation/jitter
+        # because 1080p keyframes (50-300 KB) routinely overflow a 30ms buffer,
+        # making the rate controller crush subsequent P-frames. 500k is the
+        # sweet spot for smooth output at our 8 Mbps / 4-keyframes-per-second
+        # operating point.
+        "-bufsize", "500k",
+        # Keyframe every ~0.25s. RTSP push doesn't support PLI/NACK feedback
+        # from the WebRTC side, so if the browser's decoder loses a frame it
+        # has to wait until the next scheduled keyframe to recover. We tried
+        # GOP 4 (0.13s) for faster recovery but it produced too many heavy
+        # I-frames per second for our bufsize to ride out smoothly. GOP 7
+        # restores smoothness.
+        "-g", str(max(1, AVIO_FRAMERATE // 4)),
+        "-keyint_min", str(max(1, AVIO_FRAMERATE // 4)),
+        "-bf", "0",   # redundant with -tune zerolatency; kept explicit
+        # Force a keyframe every 0.25s (matches -g above).
+        "-force_key_frames", "expr:gte(t,n_forced*0.25)",
+        "-pix_fmt", "yuv420p",       # WebRTC requires 4:2:0 chroma
+        # Push packets to the muxer as soon as the encoder emits them, instead
+        # of batching. Combined with -muxdelay 0 / -muxpreload 0 this strips
+        # ffmpeg's RTSP-output startup buffer (default ~700ms of preload).
+        "-flush_packets", "1",
+        "-muxdelay", "0",
+        "-muxpreload", "0",
+        "-f", "rtsp",
+        # TCP for the RTSP push. go2rtc 1.9.14's RTSP server only accepts
+        # TCP SETUP — UDP push gets rejected with 461 Unsupported transport
+        # — so we use TCP even though Nagle/slow-start add a small fixed
+        # latency. Could be revisited if we ever swap go2rtc for an RTSP
+        # server that accepts UDP push (mediamtx, simple-rtsp-server, etc.).
+        "-rtsp_transport", "tcp",
+        AVIO_RTSP_URL,
+    ]
+
+
+# Holds the currently-running ffmpeg subprocess so the /avio/restart HTTP
+# endpoint can kill it. Killing makes the capture loop's wait() return, the
+# outer while spins up a fresh ffmpeg with a fresh RTSP push session. This is
+# the only known way to make AV.io re-negotiate its HDMI link after Pearl
+# changes the output source — without it, ffmpeg pushes pre-switch buffered
+# frames to go2rtc indefinitely.
+avio_proc_lock = threading.Lock()
+avio_proc: Optional[subprocess.Popen] = None
+
+
+def avio_kick_capture() -> bool:
+    """Signal the capture loop to drop its current ffmpeg and start fresh.
+    Returns True if we actually killed a running process."""
+    with avio_proc_lock:
+        proc = avio_proc
+    if proc is None:
+        return False
+    try:
+        log.info("avio: kicking ffmpeg (pid=%s) — forcing fresh HDMI handshake", proc.pid)
+        proc.kill()
+        return True
+    except Exception as e:
+        log.warning("avio: kick failed: %s", e)
+        return False
+
+
+def avio_capture_loop() -> None:
+    """Keep one ffmpeg subprocess running continuously, pushing the AV.io
+    feed as RTSP to go2rtc. ffmpeg's stdout isn't read here — output goes
+    directly to go2rtc over the network. We just monitor that ffmpeg is
+    alive and respawn on failure (USB hot-plug, ffmpeg crash, source-switch
+    kick, go2rtc restart, etc.).
+    """
+    global avio_proc
+    if not Path(AVIO_FFMPEG_BIN).is_file():
+        log.warning("avio: ffmpeg not found at %s — capture loop won't start", AVIO_FFMPEG_BIN)
+        return
+    backoff = 1.0
+    while not shutdown_event.is_set():
+        proc: Optional[subprocess.Popen] = None
+        started_at = time.time()
+        try:
+            cmd = _ffmpeg_capture_args()
+            log.info("avio: starting ffmpeg → %s (%d fps @ %dp, %dk h264)",
+                     AVIO_RTSP_URL, AVIO_FRAMERATE, AVIO_HEIGHT, AVIO_BITRATE_KBPS)
+            # Drop stdout (we don't use it). Stream stderr line-by-line into
+            # the sidecar log via a daemon thread — at -loglevel info ffmpeg
+            # emits AVFoundation device-format negotiation messages we want
+            # visible; a post-exit read can't capture those if the pipe fills.
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, bufsize=1, text=True
+            )
+            with avio_proc_lock:
+                avio_proc = proc
+
+            def _drain_ffmpeg_stderr(p: subprocess.Popen) -> None:
+                try:
+                    assert p.stderr is not None
+                    for line in p.stderr:
+                        line = line.rstrip()
+                        if line:
+                            log.info("avio[ffmpeg]: %s", line)
+                except Exception as e:
+                    log.debug("avio: stderr drain ended: %s", e)
+            threading.Thread(target=_drain_ffmpeg_stderr, args=(proc,), daemon=True).start()
+            # Block until ffmpeg exits (crash, kick, or shutdown). Periodic
+            # check so the shutdown_event eventually wins.
+            while not shutdown_event.is_set():
+                if proc.poll() is not None:
+                    break
+                time.sleep(1)
+            exit_code = proc.poll()
+            uptime = time.time() - started_at
+            # Stderr is already streamed to the sidecar log by the drain thread.
+            if exit_code is None:
+                log.info("avio: ffmpeg still running after shutdown signal — terminating")
+            elif exit_code == -9 and uptime > 1.0:
+                # Killed by avio_kick_capture (source switch). Expected, quick respawn.
+                log.info("avio: ffmpeg killed after %.1fs uptime (likely source switch)", uptime)
+            else:
+                log.warning("avio: ffmpeg exited rc=%s after %.1fs", exit_code, uptime)
+            # Quick respawn if ffmpeg was up for a while (means it was working;
+            # this restart is just a kick). Backoff if ffmpeg keeps failing at
+            # startup — go2rtc unreachable, AV.io unplugged, etc.
+            backoff = 1.0 if uptime > 5.0 else min(backoff * 1.5, 15.0)
+        except Exception as e:
+            log.warning("avio: capture loop error: %s", e)
+            backoff = min(backoff * 1.5, 15.0)
+        finally:
+            with avio_proc_lock:
+                avio_proc = None
+            if proc:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                except Exception:
+                    pass
+        if shutdown_event.is_set():
+            break
+        time.sleep(backoff)
+
+
+class _AvioHandler(http.server.BaseHTTPRequestHandler):
+    # Sidecar's loopback HTTP server is now just a health probe + restart
+    # hook. Snapshots and MJPEG were retired when we switched to RTSP push +
+    # go2rtc/WebRTC — the dashboard hits go2rtc directly (proxied by the
+    # backend) for frames and live video.
+    def log_message(self, fmt: str, *args) -> None:
+        log.debug("avio-http %s - %s", self.address_string(), fmt % args)
+
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/healthz":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok\n")
+            return
+        self.send_error(404, "unknown path")
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        # POST /avio/restart — kill the running ffmpeg subprocess. The capture
+        # loop's outer while spins it back up automatically. Used after Pearl
+        # source changes to force AV.io to renegotiate the HDMI handshake;
+        # without this, ffmpeg keeps pushing its pre-switch buffered frames
+        # to go2rtc and the dashboard shows the old content indefinitely.
+        if path == "/avio/restart":
+            killed = avio_kick_capture()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true,"killed":' + (b'true' if killed else b'false') + b'}')
+            return
+        self.send_error(404, "unknown path")
+
+
+class _ThreadedHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    # Threaded so a long-running /mjpeg stream doesn't block /snapshot or /healthz.
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def avio_http_server() -> None:
+    if not Path(AVIO_FFMPEG_BIN).is_file():
+        log.warning("avio: ffmpeg not found at %s — /api/avio routes will 503. "
+                    "Place a static ffmpeg there (see backend/bin/ffmpeg).", AVIO_FFMPEG_BIN)
+        # Still start the server so the backend gets a clean 503 instead of a
+        # connection refused, which is much easier to debug.
+    try:
+        server = _ThreadedHttpServer(("127.0.0.1", AVIO_HTTP_PORT), _AvioHandler)
+    except OSError as e:
+        log.error("avio: could not bind 127.0.0.1:%d (%s) — another sidecar instance running?",
+                  AVIO_HTTP_PORT, e)
+        return
+    log.info("avio: HTTP server listening on 127.0.0.1:%d (ffmpeg=%s)",
+             AVIO_HTTP_PORT, AVIO_FFMPEG_BIN)
+    server.serve_forever()
+
+
+def main() -> int:
+    global mic_state
+    mic_state = check_macos_mic_permission()
+    log.info("mic permission: %s", mic_state)
+    if mic_state == "denied":
+        log.error("mic permission DENIED — sidecar will run but capture zero buffers. "
+                  "To fix: run sidecar/macos/build_bundle.sh --reset-tcc and re-launch the bundle.")
+    elif mic_state == "not-determined":
+        log.error("mic permission NOT-DETERMINED — daemon was started outside the .app bundle. "
+                  "Launch via 'open ~/Applications/StudioDAWSidecar.app' so the Swift shim can prompt.")
+
+    threading.Thread(target=audio_supervisor_loop, daemon=True).start()
     threading.Thread(target=levels_loop, daemon=True).start()
     threading.Thread(target=record_heartbeat_loop, daemon=True).start()
+    threading.Thread(target=health_loop, daemon=True).start()
+    threading.Thread(target=avio_http_server, daemon=True).start()
+    threading.Thread(target=avio_capture_loop, daemon=True).start()
 
-    # Graceful shutdown: close stream + recording + disconnect.
+    # Graceful shutdown: stop loops, close stream + recording + disconnect.
     def shutdown(*_):
         log.info("shutting down")
+        shutdown_event.set()
         stop_recording()
-        try: stream.stop(); stream.close()
-        except Exception: pass
+        with audio_lock:
+            _close_stream(audio_stream)
         try: sio.disconnect()
         except Exception: pass
+        # Give threads a moment to notice the event before exit.
+        time.sleep(0.2)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -509,7 +1310,7 @@ def main() -> int:
 
     # Connect (blocking with retries until dashboard is up).
     auth = {"token": SIDECAR_TOKEN} if SIDECAR_TOKEN else {}
-    while True:
+    while not shutdown_event.is_set():
         try:
             log.info("dialing dashboard at %s ...", DASHBOARD_URL)
             sio.connect(DASHBOARD_URL, namespaces=["/sidecar"], auth=auth, wait=True, wait_timeout=10)
