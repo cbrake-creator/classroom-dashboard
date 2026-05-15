@@ -111,6 +111,13 @@ AVIO_HEIGHT = env_int("AVIO_HEIGHT", 1080)       # device for 1920x1080 directly
 AVIO_RTSP_URL = env("AVIO_RTSP_URL", "rtsp://127.0.0.1:8554/avio")
 AVIO_BITRATE_KBPS = env_int("AVIO_BITRATE_KBPS", 8000)   # bumped for 1080p quality at libx264 veryfast
 
+# Path C: switch between legacy ffmpeg capture+encode and the Swift-native
+# avio-capture + ffmpeg muxer pipeline. Default stays "ffmpeg" (production
+# unchanged) — set AVIO_CAPTURE_MODE=swift in launchd plist to flip.
+AVIO_CAPTURE_MODE = env("AVIO_CAPTURE_MODE", "ffmpeg").lower()
+AVIO_SWIFT_BIN = env("AVIO_SWIFT_BIN",
+    "/Users/greenteam/Projects/classroom-dashboard-pathc/sidecar/swift-capture/.build/arm64-apple-macosx/release/avio-capture")
+
 # Which channels to actually write to disk. Format: "<ch>:<name>,<ch>:<name>..."
 # where <ch> is the 1-based channel number and <name> is the filename stem.
 # If empty, the sidecar writes one WAV per channel (all CHANNELS channels).
@@ -1121,6 +1128,12 @@ def _ffmpeg_capture_args() -> list[str]:
 avio_proc_lock = threading.Lock()
 avio_proc: Optional[subprocess.Popen] = None
 
+# When set, avio_capture_loop pauses ffmpeg respawning so an alternate AV.io
+# consumer (e.g. the avio-capture Swift binary spawned by /avio/probe-swift)
+# can hold the device for a focused test. Released by the probe handler when
+# the alternate consumer exits.
+avio_pause_capture = False
+
 
 def avio_kick_capture() -> bool:
     """Signal the capture loop to drop its current ffmpeg and start fresh.
@@ -1138,64 +1151,166 @@ def avio_kick_capture() -> bool:
         return False
 
 
+def _start_stderr_drain(proc: subprocess.Popen, label: str) -> None:
+    """Start a daemon thread that reads `proc`'s stderr line-by-line and
+    forwards each line to the sidecar log under `[label]`. Used to surface
+    ffmpeg / Swift errors during steady-state operation. Handles both binary
+    and text stderr streams since we mix bufsize=0/text=True across processes
+    in the same pipeline."""
+    def _drain() -> None:
+        try:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                line = line.rstrip()
+                if line:
+                    log.info("avio[%s]: %s", label, line)
+        except Exception as e:
+            log.debug("avio: %s stderr drain ended: %s", label, e)
+    threading.Thread(target=_drain, daemon=True).start()
+
+
+def _swift_pipeline_cmds() -> tuple[list[str], list[str]]:
+    """Return the (swift_cmd, ffmpeg_muxer_cmd) tuple for Path C.
+
+    The Swift binary captures from AV.io directly via AVCaptureSession,
+    encodes H.264 NALs via VideoToolbox, and writes Annex-B bytes to stdout.
+    ffmpeg here only muxes those pre-encoded NALs into RTSP — no decoding
+    or re-encoding. This eliminates ffmpeg's AVFoundation indev as the
+    capture mechanism (which had explicit-format-selection limitations
+    that capped realized fps under the device's advertised rate)."""
+    swift_cmd = [
+        AVIO_SWIFT_BIN,
+        "--device", "AV.io 4K Video",
+        "--width", str(1920), "--height", str(1080),
+        "--fps", "60",                # device delivers ~30 even when 60 requested
+        "--pixel-format", "nv12",
+        "--bitrate", str(AVIO_BITRATE_KBPS),
+        "--keyframe-interval", "0.25",
+        "--profile", "main",
+        "--output-stdout-nals",
+        "--duration", "0",            # run until SIGTERM
+    ]
+    ffmpeg_cmd = [
+        AVIO_FFMPEG_BIN,
+        "-nostdin", "-loglevel", "error", "-hide_banner",
+        "-fflags", "+genpts",
+        "-f", "h264", "-i", "pipe:0",
+        "-c:v", "copy",
+        "-flush_packets", "1",
+        "-muxdelay", "0",
+        "-muxpreload", "0",
+        "-f", "rtsp", "-rtsp_transport", "tcp",
+        AVIO_RTSP_URL,
+    ]
+    return swift_cmd, ffmpeg_cmd
+
+
 def avio_capture_loop() -> None:
-    """Keep one ffmpeg subprocess running continuously, pushing the AV.io
-    feed as RTSP to go2rtc. ffmpeg's stdout isn't read here — output goes
-    directly to go2rtc over the network. We just monitor that ffmpeg is
-    alive and respawn on failure (USB hot-plug, ffmpeg crash, source-switch
-    kick, go2rtc restart, etc.).
+    """Keep the AV.io capture pipeline running continuously. The active
+    pipeline depends on AVIO_CAPTURE_MODE:
+
+    - "ffmpeg" (default, legacy): one ffmpeg subprocess captures via
+      AVFoundation indev + encodes via libx264 + RTSP push to go2rtc.
+
+    - "swift" (Path C): two subprocesses chained — avio-capture (Swift)
+      drives AVCaptureSession directly + VideoToolbox H.264, pipes Annex-B
+      NALs to a slim ffmpeg muxer that does RTSP push (`-c:v copy`, no
+      re-encode). The Swift process is the "primary" — kicking it via
+      avio_kick_capture() cascades EOF down to the ffmpeg muxer.
+
+    Either pipeline pushes to AVIO_RTSP_URL (= the 'avio' stream that the
+    dashboard's WHEP client subscribes to), so the dashboard sees Path C
+    output transparently when mode flips.
     """
     global avio_proc
     if not Path(AVIO_FFMPEG_BIN).is_file():
         log.warning("avio: ffmpeg not found at %s — capture loop won't start", AVIO_FFMPEG_BIN)
         return
+    if AVIO_CAPTURE_MODE == "swift" and not Path(AVIO_SWIFT_BIN).is_file():
+        log.warning("avio: AVIO_CAPTURE_MODE=swift but avio-capture binary not found at %s — capture loop won't start. Build it with `cd sidecar/swift-capture && swift build -c release`.", AVIO_SWIFT_BIN)
+        return
+    log.info("avio: capture mode = %s", AVIO_CAPTURE_MODE)
+
     backoff = 1.0
     while not shutdown_event.is_set():
-        proc: Optional[subprocess.Popen] = None
+        # Honor the probe pause flag — set by /avio/probe-swift{,-pipeline}
+        # while an alternate consumer holds the device.
+        if avio_pause_capture:
+            time.sleep(0.5)
+            continue
+
+        # Each iteration spawns a fresh set of processes for the current mode.
+        # `all_procs` is everything we need to clean up; `primary` is what
+        # /avio/restart kicks (typically the upstream-most process in the
+        # pipeline, so EOF cascades cleanly to anything reading from it).
+        all_procs: list[subprocess.Popen] = []
+        primary: Optional[subprocess.Popen] = None
         started_at = time.time()
         try:
-            cmd = _ffmpeg_capture_args()
-            log.info("avio: starting ffmpeg → %s (%d fps @ %dp, %dk h264)",
-                     AVIO_RTSP_URL, AVIO_FRAMERATE, AVIO_HEIGHT, AVIO_BITRATE_KBPS)
-            # Drop stdout (we don't use it). Stream stderr line-by-line into
-            # the sidecar log via a daemon thread — at -loglevel info ffmpeg
-            # emits AVFoundation device-format negotiation messages we want
-            # visible; a post-exit read can't capture those if the pipe fills.
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, bufsize=1, text=True
-            )
-            with avio_proc_lock:
-                avio_proc = proc
+            if AVIO_CAPTURE_MODE == "swift":
+                swift_cmd, ffmpeg_cmd = _swift_pipeline_cmds()
+                log.info("avio: starting swift|ffmpeg pipeline → %s (target %d fps @ 1080p, %dk h264)",
+                         AVIO_RTSP_URL, AVIO_FRAMERATE, AVIO_BITRATE_KBPS)
+                swift_proc = subprocess.Popen(
+                    swift_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                )
+                ffmpeg_proc = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdin=swift_proc.stdout,
+                    stderr=subprocess.PIPE,
+                    bufsize=1,
+                    text=True,
+                )
+                # Close parent's reference so ffmpeg gets EOF when swift exits.
+                swift_proc.stdout.close()
+                # swift_proc.stderr is binary (bufsize=0 implies no text mode);
+                # the drain function decodes bytes per-line.
+                _start_stderr_drain(swift_proc, "swift")
+                _start_stderr_drain(ffmpeg_proc, "ffmpeg-mux")
+                all_procs = [swift_proc, ffmpeg_proc]
+                primary = swift_proc
+            else:  # "ffmpeg" (legacy)
+                cmd = _ffmpeg_capture_args()
+                log.info("avio: starting ffmpeg → %s (%d fps @ %dp, %dk h264)",
+                         AVIO_RTSP_URL, AVIO_FRAMERATE, AVIO_HEIGHT, AVIO_BITRATE_KBPS)
+                ff_proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    bufsize=1,
+                    text=True,
+                )
+                _start_stderr_drain(ff_proc, "ffmpeg")
+                all_procs = [ff_proc]
+                primary = ff_proc
 
-            def _drain_ffmpeg_stderr(p: subprocess.Popen) -> None:
-                try:
-                    assert p.stderr is not None
-                    for line in p.stderr:
-                        line = line.rstrip()
-                        if line:
-                            log.info("avio[ffmpeg]: %s", line)
-                except Exception as e:
-                    log.debug("avio: stderr drain ended: %s", e)
-            threading.Thread(target=_drain_ffmpeg_stderr, args=(proc,), daemon=True).start()
-            # Block until ffmpeg exits (crash, kick, or shutdown). Periodic
-            # check so the shutdown_event eventually wins.
+            with avio_proc_lock:
+                avio_proc = primary
+
+            # Wait for ANY process in the pipeline to exit (or shutdown).
             while not shutdown_event.is_set():
-                if proc.poll() is not None:
+                if any(p.poll() is not None for p in all_procs):
                     break
-                time.sleep(1)
-            exit_code = proc.poll()
+                time.sleep(0.5)
+
             uptime = time.time() - started_at
-            # Stderr is already streamed to the sidecar log by the drain thread.
-            if exit_code is None:
-                log.info("avio: ffmpeg still running after shutdown signal — terminating")
-            elif exit_code == -9 and uptime > 1.0:
-                # Killed by avio_kick_capture (source switch). Expected, quick respawn.
-                log.info("avio: ffmpeg killed after %.1fs uptime (likely source switch)", uptime)
-            else:
-                log.warning("avio: ffmpeg exited rc=%s after %.1fs", exit_code, uptime)
-            # Quick respawn if ffmpeg was up for a while (means it was working;
-            # this restart is just a kick). Backoff if ffmpeg keeps failing at
-            # startup — go2rtc unreachable, AV.io unplugged, etc.
+            # Log exit status of each.
+            labels = (["swift", "ffmpeg-mux"] if AVIO_CAPTURE_MODE == "swift" else ["ffmpeg"])
+            for p, label in zip(all_procs, labels):
+                rc = p.poll()
+                if rc is None:
+                    continue
+                if rc == -9 and uptime > 1.0:
+                    log.info("avio: %s killed after %.1fs uptime (likely source switch / kick)", label, uptime)
+                elif rc == 0:
+                    log.info("avio: %s exited cleanly after %.1fs", label, uptime)
+                else:
+                    log.warning("avio: %s exited rc=%s after %.1fs", label, rc, uptime)
             backoff = 1.0 if uptime > 5.0 else min(backoff * 1.5, 15.0)
         except Exception as e:
             log.warning("avio: capture loop error: %s", e)
@@ -1203,14 +1318,18 @@ def avio_capture_loop() -> None:
         finally:
             with avio_proc_lock:
                 avio_proc = None
-            if proc:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except Exception:
-                    pass
+            # Tear down every process in the pipeline. ffmpeg sometimes needs
+            # SIGKILL after SIGTERM since it can be stuck in a blocking read
+            # against AVFoundation or stdin pipe.
+            for p in all_procs:
+                if p.poll() is None:
+                    try:
+                        p.terminate()
+                        p.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                    except Exception:
+                        pass
         if shutdown_event.is_set():
             break
         time.sleep(backoff)
@@ -1235,6 +1354,7 @@ class _AvioHandler(http.server.BaseHTTPRequestHandler):
         self.send_error(404, "unknown path")
 
     def do_POST(self) -> None:
+        global avio_pause_capture  # used by /avio/probe-swift{,-pipeline}
         path = self.path.split("?", 1)[0]
         # POST /avio/restart — kill the running ffmpeg subprocess. The capture
         # loop's outer while spins it back up automatically. Used after Pearl
@@ -1247,6 +1367,253 @@ class _AvioHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true,"killed":' + (b'true' if killed else b'false') + b'}')
+            return
+        # POST /avio/probe-swift-pipeline — Path C Step 5: pipe avio-capture's
+        # Annex-B NAL stream into a slim ffmpeg muxer pushing to go2rtc's
+        # avio-dev stream. Lets us compare the full Path C pipeline side-by-side
+        # with the production avio stream without disturbing production. The
+        # avio-dev stream is created dynamically via go2rtc's PUT /api/streams
+        # so no go2rtc restart is needed.
+        #
+        # Query params:
+        #   duration=<seconds>   How long to run the pipeline (default: 30)
+        if path == "/avio/probe-swift-pipeline":
+            qs2 = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params2 = dict(p.split("=", 1) for p in qs2.split("&") if "=" in p) if qs2 else {}
+            duration_s = int(params2.get("duration", "30"))
+
+            swift_bin = "/Users/greenteam/Projects/classroom-dashboard-pathc/sidecar/swift-capture/.build/arm64-apple-macosx/release/avio-capture"
+            ffmpeg_bin = AVIO_FFMPEG_BIN
+            if not Path(swift_bin).is_file() or not Path(ffmpeg_bin).is_file():
+                self.send_error(503, "binary not found")
+                return
+
+            # Ensure go2rtc has the avio-dev stream registered (idempotent).
+            output_lines = []
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    "http://127.0.0.1:1984/api/streams?name=avio-dev&src=",
+                    method="PUT"
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    output_lines.append(f"go2rtc PUT /api/streams?name=avio-dev: HTTP {resp.status}")
+            except Exception as e:
+                output_lines.append(f"go2rtc PUT /api/streams: warning: {e!r} (continuing)")
+
+            swift_proc = None
+            ffmpeg_proc = None
+            avio_pause_capture = True
+            try:
+                log.info("probe-swift-pipeline: pausing ffmpeg, killing prod ffmpeg")
+                avio_kick_capture()
+                time.sleep(1.5)
+
+                swift_cmd = [
+                    swift_bin,
+                    "--device", "AV.io 4K Video",
+                    "--width", "1920", "--height", "1080",
+                    "--fps", "60", "--pixel-format", "nv12",
+                    "--bitrate", "8000",
+                    "--keyframe-interval", "0.25",
+                    "--profile", "main",
+                    "--output-stdout-nals",
+                    "--duration", "0",   # run until SIGTERM
+                ]
+                # ffmpeg here only muxes the pre-encoded H.264 into RTSP — no
+                # decoding, no re-encoding. -c:v copy = passthrough. The
+                # critical input flag is "-f h264" so ffmpeg's h264 demuxer
+                # parses our Annex-B stream correctly.
+                ffmpeg_cmd = [
+                    ffmpeg_bin,
+                    "-nostdin", "-loglevel", "error", "-hide_banner",
+                    "-fflags", "+genpts",      # generate pts from input order
+                    "-f", "h264", "-i", "pipe:0",
+                    "-c:v", "copy",
+                    "-flush_packets", "1",
+                    "-muxdelay", "0", "-muxpreload", "0",
+                    "-f", "rtsp", "-rtsp_transport", "tcp",
+                    "rtsp://127.0.0.1:8554/avio-dev",
+                ]
+
+                log.info("probe-swift-pipeline: spawning swift+ffmpeg muxer for %ds", duration_s)
+                swift_proc = subprocess.Popen(swift_cmd,
+                                              stdout=subprocess.PIPE,
+                                              stderr=subprocess.PIPE)
+                ffmpeg_proc = subprocess.Popen(ffmpeg_cmd,
+                                               stdin=swift_proc.stdout,
+                                               stderr=subprocess.PIPE)
+                # Important: close the parent's reference so ffmpeg sees EOF
+                # when swift exits. Without this, ffmpeg hangs on EOF detection.
+                swift_proc.stdout.close()
+
+                # Run pipeline for the requested duration.
+                time.sleep(duration_s)
+
+                # Query go2rtc for the avio-dev stream stats mid-run.
+                try:
+                    import urllib.request as _u
+                    with _u.urlopen("http://127.0.0.1:1984/api/streams", timeout=2) as resp:
+                        import json as _j
+                        streams = _j.loads(resp.read())
+                        if "avio-dev" in streams:
+                            info = streams["avio-dev"]
+                            prods = info.get("producers") or []
+                            cons  = info.get("consumers") or []
+                            output_lines.append(
+                                f"avio-dev: {len(prods)} producer(s), {len(cons)} consumer(s)")
+                            for p in prods:
+                                output_lines.append(
+                                    f"  PROD bytes_recv={p.get('bytes_recv')}  "
+                                    f"recv_ids={[r.get('id') for r in (p.get('receivers') or [])]}")
+                                for r in (p.get("receivers") or []):
+                                    c = r.get("codec", {})
+                                    output_lines.append(
+                                        f"    codec={c.get('codec_name')} "
+                                        f"profile={c.get('profile')} "
+                                        f"level={c.get('level')}")
+                        else:
+                            output_lines.append("avio-dev: STREAM NOT FOUND in go2rtc/api/streams")
+                except Exception as e:
+                    output_lines.append(f"go2rtc /api/streams query failed: {e!r}")
+
+                # Tear down.
+                log.info("probe-swift-pipeline: tearing down")
+                ffmpeg_proc.terminate()
+                swift_proc.terminate()
+                try: ffmpeg_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired: ffmpeg_proc.kill()
+                try: swift_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired: swift_proc.kill()
+
+                swift_stderr = swift_proc.stderr.read().decode("utf-8", errors="replace") if swift_proc.stderr else ""
+                ffmpeg_stderr = ffmpeg_proc.stderr.read().decode("utf-8", errors="replace") if ffmpeg_proc.stderr else ""
+
+                output_lines.append(
+                    f"swift exit={swift_proc.returncode}  ffmpeg exit={ffmpeg_proc.returncode}")
+                output_lines.append(f"=== swift stderr (tail) ===\n{swift_stderr[-2000:]}")
+                output_lines.append(f"=== ffmpeg stderr ===\n{ffmpeg_stderr}")
+
+            except Exception as e:
+                output_lines.append(f"probe-swift-pipeline error: {e!r}")
+                log.warning("probe-swift-pipeline failed: %s", e)
+                for p in (ffmpeg_proc, swift_proc):
+                    if p is not None and p.poll() is None:
+                        try: p.kill()
+                        except Exception: pass
+            finally:
+                avio_pause_capture = False
+                log.info("probe-swift-pipeline: unpaused ffmpeg respawn loop")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("\n".join(output_lines).encode("utf-8"))
+            return
+
+        # POST /avio/probe-swift — temporarily pause ffmpeg, run the Path C
+        # avio-capture Swift binary as a subprocess (inheriting this daemon's
+        # bundle-context Camera TCC), and return its stderr (and basic encoder
+        # output stats if mode=h264). Used for Path C validation. Removed
+        # once Path C is fully integrated (Step 7).
+        #
+        # Query params:
+        #   mode=count (default) — run in frame-counting mode (fps stats only)
+        #   mode=h264            — run with --output-stdout-nals, capture H.264
+        #                          NAL stream to /tmp/swift_test.h264, report
+        #                          file size + NAL start-code count
+        if path == "/avio/probe-swift":
+            # parse query string
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p) if qs else {}
+            mode = params.get("mode", "count")
+
+            swift_bin = "/Users/greenteam/Projects/classroom-dashboard-pathc/sidecar/swift-capture/.build/arm64-apple-macosx/release/avio-capture"
+            if not Path(swift_bin).is_file():
+                self.send_response(503)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(f"avio-capture not found at {swift_bin}\n".encode())
+                return
+
+            duration_s = 12
+            output_text = ""
+            avio_pause_capture = True
+            try:
+                log.info("probe-swift mode=%s: pausing ffmpeg, killing current proc", mode)
+                avio_kick_capture()
+                time.sleep(1.5)
+
+                base_args = [
+                    swift_bin,
+                    "--device", "AV.io 4K Video",
+                    "--width", "1920", "--height", "1080",
+                    "--fps", "60", "--pixel-format", "nv12",
+                    "--duration", str(duration_s),
+                ]
+
+                if mode == "h264":
+                    nal_path = "/tmp/swift_test.h264"
+                    Path(nal_path).unlink(missing_ok=True)
+                    args = base_args + ["--output-stdout-nals"]
+                    log.info("probe-swift h264: spawning %s, writing NALs to %s", swift_bin, nal_path)
+                    with open(nal_path, "wb") as nal_file:
+                        result = subprocess.run(
+                            args,
+                            stdout=nal_file,
+                            stderr=subprocess.PIPE,
+                            timeout=duration_s + 10,
+                        )
+                    stderr_text = result.stderr.decode("utf-8", errors="replace")
+                    # Analyze the NAL file: size, count of Annex-B start codes (0x00000001).
+                    nal_size = Path(nal_path).stat().st_size if Path(nal_path).is_file() else 0
+                    start_code_count = 0
+                    first_nal_type = None
+                    if nal_size > 0:
+                        with open(nal_path, "rb") as f:
+                            data = f.read(min(nal_size, 1024 * 1024))  # sample first 1MB
+                        start_code_count = data.count(b"\x00\x00\x00\x01")
+                        # First NAL type byte = first byte after the first start code.
+                        idx = data.find(b"\x00\x00\x00\x01")
+                        if idx >= 0 and idx + 4 < len(data):
+                            first_nal_type = data[idx + 4] & 0x1F
+                    output_text = (
+                        f"=== mode: h264 ===\n"
+                        f"=== exit code: {result.returncode} ===\n"
+                        f"=== NAL output: {nal_path} ===\n"
+                        f"  file size:           {nal_size} bytes ({nal_size / 1024:.1f} KB)\n"
+                        f"  bitrate over {duration_s}s: {(nal_size * 8 / duration_s / 1000):.1f} kbps\n"
+                        f"  NAL start codes:     {start_code_count}\n"
+                        f"  first NAL unit type: {first_nal_type} "
+                        f"({'SPS (7)' if first_nal_type==7 else 'PPS (8)' if first_nal_type==8 else 'IDR (5)' if first_nal_type==5 else 'P-slice (1)' if first_nal_type==1 else '?'})\n"
+                        f"  expected for valid H.264: file >0B, >0 start codes, first NAL type 7 (SPS)\n"
+                        f"=== avio-capture stderr ===\n{stderr_text}\n"
+                    )
+                else:
+                    log.info("probe-swift count: spawning %s for %ds", swift_bin, duration_s)
+                    result = subprocess.run(
+                        base_args,
+                        capture_output=True, text=True, timeout=duration_s + 10,
+                    )
+                    output_text = (
+                        "=== mode: count ===\n=== exit code: %d ===\n=== stdout ===\n%s\n=== stderr ===\n%s\n"
+                        % (result.returncode, result.stdout, result.stderr)
+                    )
+
+                log.info("probe-swift: exit=%d", result.returncode)
+            except subprocess.TimeoutExpired:
+                output_text = "probe-swift: TIMEOUT after %ds\n" % (duration_s + 10)
+                log.warning("probe-swift: timeout")
+            except Exception as e:
+                output_text = "probe-swift error: %r\n" % e
+                log.warning("probe-swift failed: %s", e)
+            finally:
+                avio_pause_capture = False
+                log.info("probe-swift: unpaused ffmpeg loop")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(output_text.encode("utf-8"))
             return
         self.send_error(404, "unknown path")
 

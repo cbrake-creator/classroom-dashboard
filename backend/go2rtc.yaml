@@ -26,7 +26,8 @@ webrtc:
     - stun
 
 streams:
-  avio: ~   # no source: stream accepts incoming RTSP push
+  avio: ~       # production: sidecar's ffmpeg pushes here
+  avio-dev: ~   # Path C: avio-capture → ffmpeg muxer pushes here for A/B test
 
 # go2rtc uses ffmpeg internally for /api/frame.jpeg snapshots (H.264 → JPEG)
 # and for stream transcoding. Pin to the bundled binary so it doesn't try
