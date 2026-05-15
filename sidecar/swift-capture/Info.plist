@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>           <string>avio-capture</string>
+  <key>CFBundleIdentifier</key>           <string>com.dts.avio-capture-dev</string>
+  <key>CFBundleName</key>                 <string>AV.io Capture Dev</string>
+  <key>CFBundleDisplayName</key>          <string>AV.io Capture (Dev)</string>
+  <key>CFBundleShortVersionString</key>   <string>0.1</string>
+  <key>CFBundleVersion</key>              <string>1</string>
+  <key>CFBundlePackageType</key>          <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>LSMinimumSystemVersion</key>       <string>14.0</string>
+  <!-- LSUIElement keeps it out of the Dock + Cmd-Tab when launched. -->
+  <key>LSUIElement</key>                  <true/>
+  <!-- TCC requires NSCameraUsageDescription before macOS will even prompt
+       the user for Camera permission. Without it, AVCaptureDevice
+       requestAccess(for:.video) auto-denies silently. -->
+  <key>NSCameraUsageDescription</key>
+  <string>AV.io Capture (Dev) is a development tool that opens the AV.io 4K capture card via AVCaptureSession to validate the Path C live-preview pipeline. Disposable after testing.</string>
+</dict>
+</plist>
