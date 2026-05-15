@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Path C — avio-dev WebRTC preview</title>
+<style>
+  :root { color-scheme: dark; --bg:#1a1a1a; --fg:#e8e8e8; --muted:#888; --green:#3fb950; --red:#f85149; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+  body { padding: 20px; }
+  h1 { margin: 0 0 4px; font-weight: 500; font-size: 18px; }
+  p.meta { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.4; }
+  .video-wrap { position: relative; width: 100%; max-width: 1600px; background: #000; aspect-ratio: 16/9; border-radius: 6px; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+  .stats { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); padding: 6px 10px; border-radius: 4px; font-family: SF Mono, ui-monospace, monospace; font-size: 11px; line-height: 1.5; max-width: 320px; }
+  .stats .row { display: flex; justify-content: space-between; gap: 12px; }
+  .stats .row .k { color: var(--muted); }
+  .stats .row .v { color: var(--fg); }
+  .status { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--green); }
+  .dot.dead { background: var(--red); }
+  button { background: #2a2a2a; color: var(--fg); border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-right: 8px; }
+  button:hover { background: #333; }
+</style>
+</head>
+<body>
+  <h1>Path C — avio-dev WebRTC preview</h1>
+  <p class="meta">
+    Standalone validation harness for the Path C pipeline:
+    <code>avio-capture (Swift) → ffmpeg muxer → go2rtc avio-dev stream → this page</code>.
+    Use side-by-side with the production dashboard's avio stream
+    (<code>http://localhost:3000/#dallas/faculty-podcast</code>) to A/B compare latency,
+    quality, and motion smoothness.
+  </p>
+  <p class="meta">
+    Prerequisites: the Path C swift+ffmpeg pipeline must be running. Start it by
+    POSTing to the sidecar's <code>/avio/probe-swift-pipeline</code> endpoint, e.g.<br/>
+    <code>curl -X POST 'http://127.0.0.1:3301/avio/probe-swift-pipeline?duration=120'</code>
+  </p>
+  <div class="status">
+    <div class="dot" id="dot"></div>
+    <span id="status-text">idle</span>
+    <button onclick="start()">Start</button>
+    <button onclick="stop()">Stop</button>
+  </div>
+  <div class="video-wrap">
+    <video id="v" autoplay muted playsinline></video>
+    <div class="stats" id="stats" style="display:none"></div>
+  </div>
+
+<script>
+// go2rtc API base — runs on localhost:1984 in production via the backend's
+// supervisor. Origin is wildcarded in go2rtc.yaml so the browser can hit
+// it cross-origin from this standalone harness.
+const GO2RTC_BASE = 'http://127.0.0.1:1984';
+const STREAM     = 'avio-dev';
+
+let pc = null;
+let statsTimer = null;
+const videoEl  = document.getElementById('v');
+const dot      = document.getElementById('dot');
+const statusEl = document.getElementById('status-text');
+const statsEl  = document.getElementById('stats');
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  dot.className = 'dot ' + (cls || '');
+}
+
+async function start() {
+  if (pc) { console.warn('already connected'); return; }
+  setStatus('connecting…', '');
+
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    bundlePolicy: 'max-bundle',
+  });
+  // receive-only; mirror the production WHEP client's jitter-buffer settings
+  // for a fair latency comparison.
+  const vTrx = pc.addTransceiver('video', { direction: 'recvonly' });
+  const aTrx = pc.addTransceiver('audio', { direction: 'recvonly' });
+  try { vTrx.receiver.playoutDelayHint  = 0; } catch {}
+  try { aTrx.receiver.playoutDelayHint  = 0; } catch {}
+  try { vTrx.receiver.jitterBufferTarget = 0; } catch {}
+  try { aTrx.receiver.jitterBufferTarget = 0; } catch {}
+
+  pc.ontrack = (ev) => {
+    if (videoEl.srcObject !== ev.streams[0]) {
+      videoEl.srcObject = ev.streams[0];
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') {
+      setStatus('connected', 'live');
+      statsEl.style.display = 'block';
+      startStatsLoop();
+    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      setStatus(pc.connectionState, 'dead');
+      stopStatsLoop();
+    } else {
+      setStatus(pc.connectionState, '');
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  // Wait for ICE gathering — go2rtc's WHEP doesn't support trickle.
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const handler = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', handler);
+        resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', handler);
+    setTimeout(resolve, 1500);
+  });
+
+  // go2rtc's WebRTC signaling endpoint. JSON envelope, not the raw WHEP spec.
+  const url = `${GO2RTC_BASE}/api/webrtc?src=${encodeURIComponent(STREAM)}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }),
+    });
+  } catch (e) {
+    setStatus(`fetch failed: ${e.message}`, 'dead');
+    stop();
+    return;
+  }
+  if (!res.ok) {
+    setStatus(`HTTP ${res.status} from go2rtc — is the avio-dev pipeline running?`, 'dead');
+    stop();
+    return;
+  }
+  const answer = await res.json();
+  await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+}
+
+function stop() {
+  if (pc) {
+    try { pc.close(); } catch {}
+    pc = null;
+  }
+  videoEl.srcObject = null;
+  stopStatsLoop();
+  statsEl.style.display = 'none';
+  setStatus('idle', '');
+}
+
+// Periodically pull WebRTC stats and show:
+//   - framerate the receiver is decoding
+//   - resolution
+//   - bytes received, packets lost
+//   - jitter buffer delay
+// This lets us numerically compare with the production avio stream.
+function startStatsLoop() {
+  let lastBytes = 0;
+  let lastTime  = Date.now();
+  statsTimer = setInterval(async () => {
+    if (!pc) return;
+    const stats = await pc.getStats();
+    let inbound = null, candidatePair = null;
+    stats.forEach((r) => {
+      if (r.type === 'inbound-rtp' && r.kind === 'video') inbound = r;
+      if (r.type === 'candidate-pair' && r.state === 'succeeded') candidatePair = r;
+    });
+    if (!inbound) return;
+    const now = Date.now();
+    const dtMs = now - lastTime;
+    const dBytes = (inbound.bytesReceived || 0) - lastBytes;
+    const kbps = dtMs > 0 ? Math.round((dBytes * 8) / dtMs) : 0;
+    lastBytes = inbound.bytesReceived || 0;
+    lastTime = now;
+
+    const fps = inbound.framesPerSecond?.toFixed(1) ?? '?';
+    const w   = inbound.frameWidth  ?? '?';
+    const h   = inbound.frameHeight ?? '?';
+    const decoded   = inbound.framesDecoded ?? 0;
+    const dropped   = inbound.framesDropped ?? 0;
+    const jbDelay   = inbound.jitterBufferDelay && inbound.jitterBufferEmittedCount
+      ? ((inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000).toFixed(0)
+      : '?';
+    const rtt = candidatePair?.currentRoundTripTime
+      ? (candidatePair.currentRoundTripTime * 1000).toFixed(1)
+      : '?';
+
+    statsEl.innerHTML = `
+      <div class="row"><span class="k">stream</span><span class="v">${STREAM}</span></div>
+      <div class="row"><span class="k">res</span><span class="v">${w}×${h}</span></div>
+      <div class="row"><span class="k">fps</span><span class="v">${fps}</span></div>
+      <div class="row"><span class="k">bitrate</span><span class="v">${kbps} kbps</span></div>
+      <div class="row"><span class="k">decoded</span><span class="v">${decoded}</span></div>
+      <div class="row"><span class="k">dropped</span><span class="v">${dropped}</span></div>
+      <div class="row"><span class="k">avg jitter buffer</span><span class="v">${jbDelay} ms</span></div>
+      <div class="row"><span class="k">ICE RTT</span><span class="v">${rtt} ms</span></div>
+    `;
+  }, 1000);
+}
+function stopStatsLoop() {
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+}
+
+// Auto-connect on load.
+start();
+</script>
+</body>
+</html>

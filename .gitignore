@@ -8,3 +8,7 @@ claude-memory/
 # Install fresh on a new machine via sidecar/macos/build_bundle.sh and
 # the README, not via git.
 bin/
+
+# Swift Package Manager build artifacts (Path C avio-capture).
+# Rebuild on a new machine via `cd sidecar/swift-capture && swift build -c release`.
+sidecar/swift-capture/.build/
