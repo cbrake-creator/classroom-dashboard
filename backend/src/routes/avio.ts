@@ -109,6 +109,12 @@ router.get('/:deviceId/source', async (req, res, next) => {
 // Pearl will use whatever it has stored on its side. Always kicks the sidecar
 // after writing settings; otherwise the dashboard would keep showing the
 // pre-switch frames for minutes.
+//
+// Caveat (2026-05-15): channels encoded at 4K in Pearl (Left/Right here) show
+// a green cast in the 1080p HDMI 1 output when solo'd, because Pearl's
+// channel→output downscale appears to have a colormatrix bug. The MultiViewer
+// path does NOT have this issue. Center Camera (1080p channel) is also fine
+// since no downscale is needed. Tracked separately — see project memory.
 router.post('/:deviceId/source', async (req, res, next) => {
   try {
     const r = getCardWithPearl(req.params.deviceId);

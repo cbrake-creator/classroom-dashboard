@@ -1658,14 +1658,17 @@ function renderRoomDetail(roomId, viewChanged) {
       </span>
     </div>
     ${room.type === 'studio' ? renderStudioSessionBar(room) : ''}
-    ${room.type === 'studio' && room.devices.some(d => d.type === 'camera') ? `<div id="preset-panel-${room.id}"></div>` : ''}
+    ${room.type === 'studio' && room.devices.some(d => d.type === 'camera') && room.id !== 'faculty-podcast' ? `<div id="preset-panel-${room.id}"></div>` : ''}
     <div class="device-grid">
       ${orderedRoomDevices(room).map(d => renderDeviceCard(d)).join('')}
     </div>
   `;
-  // Room-level multi-cam preset panel: studios only (Faculty Podcast / Tech Talks).
+  // Room-level multi-cam preset panel: Tech Talks only.
+  // Faculty Podcast used to share this UI but no longer needs it — its three
+  // Canon CR-N300s were replaced by R5Cs feeding Pearl over HDMI, so per-camera
+  // PTZ presets aren't meaningful there. (See project_studio_cameras.md.)
   // Classrooms get 3 per-camera presets rendered inside each camera card instead.
-  if (room.type === 'studio' && room.devices.some(d => d.type === 'camera')) {
+  if (room.type === 'studio' && room.devices.some(d => d.type === 'camera') && room.id !== 'faculty-podcast') {
     if (presetState.has(room.id)) {
       renderPresetPanel(room.id);
     } else if (viewChanged !== false) {
